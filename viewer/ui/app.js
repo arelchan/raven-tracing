@@ -392,6 +392,26 @@ function currentTrace() {
   return traces.find((trace) => trace.traceKey === state.selectedTraceKey) || traces[0] || null;
 }
 
+function jumpToTraceByTraceId(traceId, spanId) {
+  // Navigate to another trace (subagent run ↔ parent turn) by its traceId.
+  // The subagent trace lives in the same session, so search current session first.
+  if (!traceId) return false;
+  const ordered = currentSession()
+    ? [currentSession(), ...allSessions().filter((s) => s !== currentSession())]
+    : allSessions();
+  for (const session of ordered) {
+    const trace = (session.traces || []).find((t) => t.traceId === traceId);
+    if (!trace) continue;
+    state.selectedSessionId = session.sessionId;
+    state.selectedTraceKey = trace.traceKey;
+    state.selectedSpanId = spanId || trace.tree?.[0]?.spanId || trace.spans?.[0]?.spanId || null;
+    state.detailsRenderSignature = null;
+    render();
+    return true;
+  }
+  return false;
+}
+
 function currentApiCall() {
   return (
     filteredApiCalls().find(
@@ -617,6 +637,7 @@ function collectArtifacts(span) {
   push('Tool Output', attrs['tool.output.artifact_path']);
   push('Tool Persisted', attrs['tool.persisted.artifact_path']);
   push('Skill Read', attrs['skill.read.artifact_path']);
+  push('Skill Injected', attrs['skill.inject.artifact_path']);
   push('Memory Recall', attrs['memory.recall.artifact_path']);
   push('Memory Store', attrs['memory.store.artifact_path']);
   push('Subagent Result', attrs['subagent.result.artifact_path']);
@@ -1064,15 +1085,38 @@ function renderSubagentCallCard(span, artifacts) {
   const task = attrs['subagent.task'] || attrs['subagent.label'] || '';
   const dispatchInput = task || '';
   const dispatchOutput = toolOutput?.result ?? toolOutput?.output ?? null;
+  // everclaw persists the subagent's final return ON the span itself — the
+  // `Subagent Result` artifact ({task, result}) plus the `subagent.result_preview`
+  // attribute — NOT as a separate child session (the openclaw model just below).
+  // Without this, the card only checked the child-session / spawn-tool paths,
+  // found nothing for everclaw, and fell back to "还没有拿到子 agent 的最终返回"
+  // even though the result was right there.
+  const subagentResult = artifactByLabel(artifacts, 'Subagent Result')?.parsed;
+  const resultText = subagentResult?.result ?? attrs['subagent.result_preview'] ?? null;
   const childSession = findSessionByIdentity(
     attrs['subagent.session_id'] || null,
     attrs['subagent.session_key'] || null
   );
   const childOutcome = latestChildOutput(childSession);
-  const outputText = childOutcome?.text || null;
-  const outputSource = childOutcome ? 'child session final output' : 'spawn accepted payload';
+  const outputText = childOutcome?.text || resultText || null;
+  const outputSource = childOutcome
+    ? 'child session final output'
+    : (resultText ? 'subagent result artifact' : 'spawn accepted payload');
+
+  // Forward link: everclaw runs the subagent as its OWN trace; this dispatch
+  // node only summarizes it. Offer a jump into that trace's full tree.
+  const subTraceId = attrs['subagent.trace_id'] || null;
+  const jumpCard = subTraceId
+    ? `
+    <article class="content-card wide-card trace-jump-card">
+      <button type="button" class="trace-jump-btn" data-jump-trace-id="${escapeHtml(subTraceId)}">
+        → 打开 subagent 的完整 trace
+      </button>
+    </article>`
+    : '';
 
   return `
+    ${jumpCard}
     <article class="content-card wide-card">
       <header>
         <h4>Subagent Input</h4>
@@ -1084,6 +1128,32 @@ function renderSubagentCallCard(span, artifacts) {
         <h4>Subagent Output</h4>
       </header>
       <pre class="structured-pre">${escapeHtml(prettyValue(outputText ?? dispatchOutput, outputText || dispatchOutput ? '(empty)' : '还没有拿到子 agent 的最终返回'))}</pre>
+    </article>
+  `;
+}
+
+function renderSubagentRunCard(span) {
+  if (span.name !== 'subagent.run') return '';
+  const attrs = span.attributes || {};
+  const parentTraceId = attrs['subagent.parent_trace_id'] || null;
+  const parentSpanId = attrs['subagent.parent_span_id'] || null;
+  const task = attrs['subagent.task'] || attrs['subagent.label'] || '';
+  // Back link: this trace is one subagent run; return to the turn that spawned it.
+  const backCard = parentTraceId
+    ? `
+    <article class="content-card wide-card trace-jump-card">
+      <button type="button" class="trace-jump-btn" data-jump-trace-id="${escapeHtml(parentTraceId)}"${parentSpanId ? ` data-jump-span-id="${escapeHtml(parentSpanId)}"` : ''}>
+        ← 返回主 trace
+      </button>
+    </article>`
+    : '';
+  return `
+    ${backCard}
+    <article class="content-card wide-card">
+      <header>
+        <h4>Subagent Task</h4>
+      </header>
+      <pre class="structured-pre">${escapeHtml(prettyValue(task))}</pre>
     </article>
   `;
 }
@@ -1714,19 +1784,27 @@ function renderSkillReadCard(trace, span, artifacts) {
   const skillReadArtifact = artifactByLabel(artifacts, 'Skill Read');
   const readContent = artifactByLabel(artifacts, 'Read Content');
   const readRequest = artifactByLabel(artifacts, 'Read Request');
+  // everclaw's read_file→skill.read carries content/params on the re-typed tool
+  // span's own Tool Input/Output artifacts (+ skill.result_preview), not the
+  // openclaw Skill Read / Read Content / Read Request artifacts. Fall back to
+  // everclaw's so the card isn't empty.
+  const toolInput = artifactByLabel(artifacts, 'Tool Input');
+  const toolOutput = artifactByLabel(artifacts, 'Tool Output');
   const readInputValue = {
     skill: attrs['skill.name'] || evidence.skillName || '-',
     path: attrs['skill.path'] || evidence.path || '-',
     resolvedPath: attrs['skill.resolved_path'] || skillReadArtifact?.parsed?.resolvedFilePath || '-',
     source: attrs['skill.source'] || evidence.source || '-',
-    viaTool: attrs['skill.read.via_tool'] || 'read',
-    request: readRequest?.parsed?.params ?? null
+    viaTool: attrs['skill.read.via_tool'] || attrs['skill.injected_via'] || attrs['skill.tool'] || 'read',
+    request: readRequest?.parsed?.params ?? toolInput?.parsed?.params ?? null
   };
   const readContentValue =
     readContent?.parsed?.result ??
     readContent?.parsed?.output ??
     readContent?.content ??
     skillReadArtifact?.parsed?.fileInfo?.preview ??
+    toolOutput?.parsed?.result ??
+    attrs['skill.result_preview'] ??
     '';
   return `
     <article class="content-card wide-card">
@@ -1795,6 +1873,24 @@ function renderSessionTurnCard(trace, span) {
   const duration = trace?.durationMs != null ? formatDuration(trace.durationMs) : (span.durationMs != null ? formatDuration(span.durationMs) : '-');
   const trigger = triggerLabel(span.trigger || attrs['trigger']);
   const agent = span.agentId || 'agent';
+  // "Loaded this turn": tools / plugin backend+tools / skills, captured on the
+  // turn span by the plugin. Omit the whole block for old traces that predate it.
+  const tools = Array.isArray(attrs['turn.tools']) ? attrs['turn.tools'] : [];
+  const pluginBackend = attrs['turn.plugin.backend'] || null;
+  const pluginTools = Array.isArray(attrs['turn.plugin.tools']) ? attrs['turn.plugin.tools'] : [];
+  const skills = Array.isArray(attrs['turn.skills']) ? attrs['turn.skills'] : [];
+  const skillCount = attrs['turn.skill_count'] != null ? attrs['turn.skill_count'] : skills.length;
+  const hasCaps = attrs['turn.tools'] !== undefined || attrs['turn.skills'] !== undefined || attrs['turn.plugin.backend'] !== undefined;
+  const chips = (arr) => arr.length ? arr.map((x) => `<span class="span-chip">${escapeHtml(String(x))}</span>`).join('') : '<span class="evidence-sub">—</span>';
+  const capsSection = hasCaps ? `
+        <section class="overview-row">
+          <div class="overview-title"><strong>loaded this turn</strong></div>
+          <div class="evidence-sub">plugins: ${pluginBackend ? `backend=<strong>${escapeHtml(pluginBackend)}</strong>` : 'backend=<strong>none</strong>'}${pluginTools.length ? ` · plugin tools: ${pluginTools.map((t) => escapeHtml(String(t))).join(', ')}` : ' · no plugin tools'}</div>
+          <div class="evidence-sub">tools (${tools.length}):</div>
+          <div class="overview-tags">${chips(tools)}</div>
+          <div class="evidence-sub">skills available (${skillCount}):</div>
+          <div class="overview-tags">${chips(skills)}</div>
+        </section>` : '';
   return `
     <article class="content-card wide-card">
       <header>
@@ -1829,7 +1925,7 @@ function renderSessionTurnCard(trace, span) {
             <span class="summary-chip">${summary.subagents} subagent</span>
             <span class="summary-chip">${summary.readSkills.length} skill.read</span>
           </div>
-        </section>
+        </section>${capsSection}
       </div>
     </article>
   `;
@@ -1850,6 +1946,12 @@ function renderContent(span, trace, artifacts) {
     hiddenArtifactLabels.add('Skill Read');
     hiddenArtifactLabels.add('Read Request');
     hiddenArtifactLabels.add('Read Content');
+    // everclaw's read_file→skill.read is a re-typed tool call: its Tool
+    // Input/Output ARE the skill's input/output, now consumed by
+    // renderSkillReadCard. Hide them so they don't double-render as
+    // separate Tool cards alongside the Skill cards.
+    hiddenArtifactLabels.add('Tool Input');
+    hiddenArtifactLabels.add('Tool Output');
   }
   const artifactEntries = artifacts.filter((entry) => !hiddenArtifactLabels.has(entry.label));
   const artifactCards = span.name === 'session.turn'
@@ -1908,6 +2010,7 @@ function renderContent(span, trace, artifacts) {
       ${renderModelOutputCard(span, artifacts)}
       ${renderToolCallCard(span, artifacts)}
       ${renderSubagentCallCard(span, artifacts)}
+      ${renderSubagentRunCard(span)}
       ${renderSkillReadCard(trace, span, artifacts)}
       ${renderSkillEvidenceCard(trace, span)}
       ${artifactCards}
@@ -1968,6 +2071,11 @@ async function renderDetails() {
   }
 
   elements.detailsBody.innerHTML = renderContent(span, trace, artifacts);
+  elements.detailsBody.querySelectorAll('[data-jump-trace-id]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      jumpToTraceByTraceId(btn.dataset.jumpTraceId, btn.dataset.jumpSpanId || null);
+    });
+  });
   hydrateOpenDetails();
   restoreScrollState();
 }

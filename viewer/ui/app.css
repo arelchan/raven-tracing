@@ -2099,3 +2099,32 @@ body.app-view-api .api-only {
     grid-template-columns: 1fr;
   }
 }
+
+/* Subagent cross-trace navigation (dispatch → subagent run, and back) */
+.trace-jump-card {
+  padding: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+.trace-jump-btn {
+  width: 100%;
+  padding: 11px 16px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+  color: #06121d;
+  border: none;
+  border-radius: 10px;
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+  transition: filter 0.12s ease, transform 0.12s ease;
+}
+.trace-jump-btn:hover {
+  filter: brightness(1.07);
+  transform: translateY(-1px);
+}
+.trace-jump-btn:active {
+  transform: translateY(0);
+}

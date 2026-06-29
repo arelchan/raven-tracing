@@ -258,18 +258,27 @@ function detectSpanFailure(span, attrs) {
   }
 
   if (span?.name === 'subagent.call') {
-    const subagentStatus = attrs['subagent.status'];
-    if (subagentStatus && String(subagentStatus).toLowerCase() !== 'accepted') {
-      return { isFailed: true, failureLabel: String(subagentStatus) };
+    // Only genuine-failure statuses are failures. openclaw used 'accepted' for
+    // a successful spawn; everclaw uses 'ok' / 'completed' / 'ended'. Flagging
+    // anything != 'accepted' wrongly marked successful everclaw subagents red —
+    // the span's own status.code (checked above) is authoritative.
+    const subagentStatus = String(attrs['subagent.status'] || '').toLowerCase();
+    if (subagentStatus === 'error' || subagentStatus === 'failed') {
+      return { isFailed: true, failureLabel: subagentStatus };
     }
   }
 
   if (span?.name === 'skill.read') {
+    // openclaw's skill.read signals success via skill.read.* byte/sha attrs;
+    // everclaw's read_file→skill.read signals it via skill.result_preview /
+    // skill.path / tool.output.artifact_bytes. Accept EITHER family as evidence
+    // of a real read so a successful everclaw read (status.code already OK above)
+    // isn't false-flagged "read failed" just because the openclaw attrs are absent.
     const bytes = attrs['skill.read.file_bytes'];
     const sha1 = attrs['skill.read.file_sha1'];
-    const preview = attrs['skill.read.preview'];
-    const artifactBytes = attrs['skill.read.artifact_bytes'];
-    const artifactPath = attrs['skill.read.artifact_path'];
+    const preview = attrs['skill.read.preview'] || attrs['skill.result_preview'];
+    const artifactBytes = attrs['skill.read.artifact_bytes'] ?? attrs['tool.output.artifact_bytes'];
+    const artifactPath = attrs['skill.read.artifact_path'] || attrs['skill.path'];
     if (
       (bytes == null || bytes === 0) &&
       !sha1 &&
@@ -288,12 +297,14 @@ function buildSpanTitle(name, attrs) {
   if (name === 'llm.call') return 'model call';
   if (name === 'tool.call') return 'tool call';
   if (name === 'subagent.call') return 'subagent dispatch';
+  if (name === 'subagent.run') return 'subagent run';
   if (name === 'skills.cataloged') return 'skills cataloged';
   if (name === 'skills.catalog_read') return 'skill catalog read';
   if (name === 'skill.read') return 'skill read';
   if (name === 'skills.scan') return 'skills scan';
-  if (name === 'session.turn') return 'session turn';
+  if (name === 'session.turn') return 'trace';
   if (name === 'skill.use') return 'skill use';
+  if (name === 'skill.inject') return 'skill inject';
   if (name === 'memory.recall') return 'memory recall';
   if (name === 'memory.store') return 'memory store';
   if (name === 'memory.extract') return 'memory extract';
@@ -310,13 +321,19 @@ function buildSpanSubtitle(name, attrs) {
   if (name === 'tool.call') return attrs['tool.name'] || '';
   if (name === 'subagent.call') {
     if (attrs['subagent.id']) return `named subagent / ${attrs['subagent.id']}`;
-    return 'derived subagent';
+    return attrs['subagent.label'] || 'derived subagent';
   }
+  if (name === 'subagent.run') return attrs['subagent.label'] || attrs['subagent.task'] || 'subagent';
   if (name === 'skills.cataloged') return `${attrs['skills.cataloged.count'] || 0} skills`;
   if (name === 'skills.catalog_read') return attrs['skills.catalog_read.skill_name'] || '';
   if (name === 'skill.read') return attrs['skill.name'] || '';
   if (name === 'skills.scan') return `${attrs['skills.scan.total_count'] || 0} skills`;
   if (name === 'skill.use') return attrs['skill.name'] || attrs['skill.id'] || '';
+  if (name === 'skill.inject') {
+    const names = attrs['skill.inject.names'];
+    const label = Array.isArray(names) && names.length ? names.join(', ') : `${attrs['skill.inject.count'] || 0} skills`;
+    return attrs['skill.inject.via'] ? `${label} (${attrs['skill.inject.via']})` : label;
+  }
   if (name === 'memory.recall') {
     return [attrs['memory.scope'], attrs['memory.hits'] != null ? `${attrs['memory.hits']} hits` : null]
       .filter(Boolean).join(' / ');
@@ -501,7 +518,10 @@ function buildTraceGroups(sessionSpans) {
     children.sort(compareSpansByTime);
   }
 
-  let rootCandidates = spans.filter((span) => span.name === 'session.turn' && (!span.parentSpanId || !spanById.has(span.parentSpanId)));
+  // session.turn roots the main trace; subagent.run roots a subagent's OWN
+  // trace (everclaw subagents run as a separate trace, linked via the dispatch
+  // node's subagent.trace_id). Both are first-class trace roots.
+  let rootCandidates = spans.filter((span) => (span.name === 'session.turn' || span.name === 'subagent.run') && (!span.parentSpanId || !spanById.has(span.parentSpanId)));
   if (!rootCandidates.length) {
     rootCandidates = spans.filter((span) => !span.parentSpanId || !spanById.has(span.parentSpanId));
   }

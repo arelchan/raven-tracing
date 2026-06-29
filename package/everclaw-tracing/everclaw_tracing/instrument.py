@@ -10,7 +10,15 @@ P0 probes (full fidelity):
   - llm.call       ← LLMProvider.chat_with_retry
   - tool.call / skill.use / skill.read   ← ToolRegistry.execute
 
-P1 (not yet here): memory.*, subagent.call, plugin.load.
+P1: memory.*, subagent.call, plugin.load, skill.inject.
+
+Skill activity has two surfaces and we capture both:
+  - skill.use / skill.read   ← the use_skill/read_skill tools, AND a read_file
+    whose path is a SKILL.md (the model reading a skill body on its own).
+  - skill.inject             ← the context engine auto-injecting skill BODIES
+    into the system prompt, via ActiveSkillsSegmentBuilder (always-on skills)
+    and SkillsSegmentBuilder (router + gate selected skills). This is the
+    dominant path and happens with no tool call at all.
 """
 
 from __future__ import annotations
@@ -20,6 +28,7 @@ import functools
 import inspect
 import logging
 import time
+from collections import Counter
 from typing import Any, Callable
 
 from . import config
@@ -32,6 +41,10 @@ logger = logging.getLogger("everclaw.plugin.everclaw-tracing")
 
 # Skill tools surface as ordinary tool calls; we re-type them to `skills`.
 _SKILL_TOOLS = {"use_skill", "read_skill"}
+# A read_file whose path is a SKILL.md is the model reading a skill body itself
+# (the "summary" injection mode literally tells it to read_file the SKILL.md);
+# re-type that single-purpose read to skill.read so it shows as a skill node.
+_FILE_READ_TOOLS = {"read_file"}
 
 # key "Class.method" -> (target_cls, method_name, original_fn) for uninstall.
 _originals: dict[str, tuple[type, str, Callable]] = {}
@@ -85,6 +98,40 @@ def _wrap(target_cls: type, method_name: str, factory: Callable[[Callable], Call
 # ── probe: session.turn ─────────────────────────────────────────────────────
 
 
+def _turn_capabilities(loop: Any) -> dict[str, Any]:
+    """Snapshot what this turn's agent has loaded: tools, plugin backend +
+    plugin-contributed tools, and the available skills. Read off the AgentLoop
+    (``self``) at the turn probe. Each piece is best-effort — a missing attr
+    just omits that field, never breaks the turn span. This makes every trace
+    self-describing (e.g. a TUI trace plainly shows backend=null / no plugins)."""
+    caps: dict[str, Any] = {}
+    try:
+        names = loop.tools.tool_names()
+        caps["turn.tools"] = list(names)
+        caps["turn.tool_count"] = len(names)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        backend = getattr(loop, "backend", None)
+        caps["turn.plugin.backend"] = type(backend).__name__ if backend is not None else None
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        ptools = getattr(loop, "plugin_tools", None) or []
+        caps["turn.plugin.tools"] = [getattr(t, "name", None) for t in ptools]
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        cat = getattr(getattr(loop, "context", None), "skills", None)
+        reg = getattr(cat, "registry", None) or getattr(cat, "_registry", None)
+        metas = list(reg.list_all()) if reg is not None else []
+        caps["turn.skills"] = [getattr(m, "name", None) for m in metas][:50]
+        caps["turn.skill_count"] = len(metas)
+    except Exception:  # noqa: BLE001
+        pass
+    return caps
+
+
 def _install_turn(AgentLoop: type) -> bool:
     def factory(original):
         async def wrapper(self, msg, session_key=None, *args, **kwargs):
@@ -96,7 +143,12 @@ def _install_turn(AgentLoop: type) -> bool:
                 channel, chat_id = channel or ch2, chat_id or cid2
             root_id = ctx.new_span_id()
             start = spans.now_iso()
-            user_input = getattr(msg, "content", None)
+            # everclaw renamed the turn payload: old `msg.content` became
+            # `TurnRequest.text`. `msg` is the positional arg (a TurnRequest on
+            # current everclaw). Accept either so the probe spans both versions.
+            user_input = getattr(msg, "text", None)
+            if user_input is None:
+                user_input = getattr(msg, "content", None)
             with ctx.turn_scope(session_key=sk, channel=channel, chat_id=chat_id, root_span_id=root_id) as tc:
                 meta = {"traceId": tc.trace_id, "sessionKey": sk}
                 in_art = spans.persist_artifact(
@@ -136,6 +188,7 @@ def _install_turn(AgentLoop: type) -> bool:
                         "turn.output_preview": _preview(out_content),
                         "turn.in_progress": False,
                     }
+                    attrs.update(_turn_capabilities(self))  # tools / plugins / skills this turn
                     attrs.update(spans.artifact_attributes("turn.input", in_art))
                     attrs.update(spans.artifact_attributes("turn.output", out_art))
                     spans.emit(spans.build_span(
@@ -149,7 +202,11 @@ def _install_turn(AgentLoop: type) -> bool:
                     ))
         return wrapper
 
-    return _wrap(AgentLoop, "_process_message", factory, expect_params=["msg", "session_key"])
+    # Guard on `session_key` only: everclaw's first positional arg was renamed
+    # (msg -> req) but binds positionally, so its name is irrelevant. Checking
+    # for `msg` here used to disable the whole root-span probe after that
+    # rename, orphaning every child span.
+    return _wrap(AgentLoop, "_process_message", factory, expect_params=["session_key"])
 
 
 # ── probe: llm.call ─────────────────────────────────────────────────────────
@@ -381,6 +438,32 @@ def _skill_attrs(tool_name: str, params: Any, result: Any) -> dict[str, Any]:
     }
 
 
+def _skill_name_from_path(path: str | None) -> str | None:
+    """``…/skills/weather/SKILL.md`` → ``weather`` (the skill dir name)."""
+    if not path:
+        return None
+    parts = [p for p in str(path).replace("\\", "/").split("/") if p]
+    if len(parts) >= 2 and parts[-1].lower() == "skill.md":
+        return parts[-2]
+    return parts[-1] if parts else None
+
+
+def _skill_read_path(name: str, params: Any) -> str | None:
+    """If a read_file targets a SKILL.md, return that path; else ``None``.
+
+    This is the discovery→injection follow-through: everclaw's summary mode
+    tells the agent to ``read_file`` a skill's SKILL.md, and subagents (which
+    only get the skill *catalog*) do the same. Those reads carry the real body
+    into context but look like a plain file read — re-type them to skill.read.
+    """
+    if name not in _FILE_READ_TOOLS:
+        return None
+    path = params.get("path") if isinstance(params, dict) else (params if isinstance(params, str) else None)
+    if isinstance(path, str) and path.replace("\\", "/").lower().rstrip("/").endswith("skill.md"):
+        return path
+    return None
+
+
 def _install_tool(ToolRegistry: type) -> bool:
     def factory(original):
         async def wrapper(self, name, params, *args, **kwargs):
@@ -410,10 +493,20 @@ def _install_tool(ToolRegistry: type) -> bool:
             finally:
                 duration_ms = int((time.monotonic() - t0) * 1000)
                 out_art = spans.persist_artifact("tool-output", meta, {"result": result}, label=name or "tool-output")
+                skill_read_path = _skill_read_path(name, params)
                 if name in _SKILL_TOOLS:
                     span_name = "skill.use" if name == "use_skill" else "skill.read"
                     span_type = "skills"
                     attrs = _skill_attrs(name, params, result)
+                elif skill_read_path:
+                    span_name, span_type = "skill.read", "skills"
+                    attrs = {
+                        "skill.tool": name,
+                        "skill.injected_via": "read_file",
+                        "skill.path": skill_read_path,
+                        "skill.name": _skill_name_from_path(skill_read_path),
+                        "skill.result_preview": _preview(result),
+                    }
                 else:
                     span_name, span_type = "tool.call", "tool_call"
                     attrs = {
@@ -624,7 +717,39 @@ def _install_memory_consolidate(MemoryConsolidator: type) -> bool:
 _subagent_pending: dict[str, dict] = {}
 
 
+def _emit_subagent_root(info: dict, *, in_progress: bool, status: Any = "ok") -> None:
+    """Root span of the subagent's OWN trace. The subagent's llm/tool/memory
+    spans hang off this (via the turn_scope opened in run_factory), so they form
+    a separate trace group instead of bloating the parent turn's tree. Carries a
+    back-link (parent_trace_id + parent_span_id) so the viewer can offer
+    "return to main trace". Emitted in-progress at start, re-emitted closed at
+    end (viewer dedups by spanId) so the trace has a root the whole time."""
+    if not info.get("sub_trace_id") or not info.get("sub_root_id"):
+        return
+    end = info["start"] if in_progress else spans.now_iso()
+    is_err = (not in_progress) and str(status).lower() not in {"ok", "completed", "ended", "unknown"}
+    attrs = {
+        "subagent.task": _preview(info["task"], 300),
+        "subagent.label": info["label"],
+        "subagent.status": status,
+        "subagent.in_progress": in_progress,
+        "subagent.parent_trace_id": info["trace_id"],
+        "subagent.parent_span_id": info["span_id"],
+    }
+    spans.emit(spans.build_span(
+        "subagent.run", "subagent_call",
+        trace_id=info["sub_trace_id"], span_id=info["sub_root_id"], parent_span_id=None,
+        session_key=info["session_key"], channel=info["channel"], chat_id=info["chat_id"],
+        start_time=info["start"], end_time=end,
+        status_code="ERROR" if is_err else "OK", status_message=str(status) if is_err else "",
+        attributes=attrs,
+        events=[{"time": info["start"], "name": "subagent.run.start"}],
+    ))
+
+
 def _emit_subagent(info: dict, *, status: Any, result: Any) -> None:
+    """The dispatch node — stays in the PARENT trace as a leaf. Forward-links to
+    the subagent's own trace via ``subagent.trace_id`` so the viewer can jump."""
     meta = {"traceId": info["trace_id"], "sessionKey": info["session_key"]}
     art = spans.persist_artifact("subagent-result", meta, {"task": info["task"], "result": result}, label="subagent-result")
     is_err = str(status).lower() not in {"ok", "completed", "ended"}
@@ -633,6 +758,7 @@ def _emit_subagent(info: dict, *, status: Any, result: Any) -> None:
         "subagent.label": info["label"],
         "subagent.status": status,
         "subagent.result_preview": _preview(result),
+        "subagent.trace_id": info.get("sub_trace_id"),
         **spans.artifact_attributes("subagent.result", art),
     }
     spans.emit(spans.build_span(
@@ -649,8 +775,9 @@ def _install_subagent(SubagentManager: type) -> bool:
     def run_factory(original):
         async def wrapper(self, task_id, task, label, origin, *args, **kwargs):
             tc = ctx.current()
-            span_id = ctx.new_span_id()
-            _subagent_pending[task_id] = {
+            span_id = ctx.new_span_id()       # dispatch (subagent.call) — parent trace
+            sub_root_id = ctx.new_span_id()   # root of the subagent's OWN trace
+            base = {
                 "span_id": span_id,
                 "trace_id": tc.trace_id if tc else ctx.new_trace_id(),
                 "parent": tc.parent_span_id if tc else None,
@@ -659,15 +786,25 @@ def _install_subagent(SubagentManager: type) -> bool:
                 "chat_id": tc.chat_id if tc else None,
                 "start": spans.now_iso(),
                 "task": task, "label": label,
+                "sub_root_id": sub_root_id,
             }
-            try:
-                # child_scope so the child loop's llm.call / tool.call nest here.
-                with ctx.child_scope(span_id):
+            # Open the subagent's OWN trace so its llm/tool/memory spans form a
+            # separate trace group rooted at sub_root_id — keeps the parent turn's
+            # tree short. The dispatch node above is emitted into the PARENT trace.
+            with ctx.turn_scope(
+                session_key=base["session_key"], channel=base["channel"],
+                chat_id=base["chat_id"], root_span_id=sub_root_id,
+            ) as sub_tc:
+                base["sub_trace_id"] = sub_tc.trace_id
+                _subagent_pending[task_id] = base
+                _emit_subagent_root(base, in_progress=True)
+                try:
                     return await original(self, task_id, task, label, origin, *args, **kwargs)
-            finally:
-                info = _subagent_pending.pop(task_id, None)
-                if info is not None:  # announce didn't fire (cancelled / crashed)
-                    _emit_subagent(info, status="unknown", result=None)
+                finally:
+                    _emit_subagent_root(base, in_progress=False, status="ok")
+                    info = _subagent_pending.pop(task_id, None)
+                    if info is not None:  # announce didn't fire (cancelled / crashed)
+                        _emit_subagent(info, status="unknown", result=None)
         return wrapper
 
     def announce_factory(original):
@@ -676,6 +813,7 @@ def _install_subagent(SubagentManager: type) -> bool:
                 "span_id": ctx.new_span_id(), "trace_id": ctx.new_trace_id(), "parent": None,
                 "session_key": None, "channel": None, "chat_id": None,
                 "start": spans.now_iso(), "task": task, "label": label,
+                "sub_trace_id": None, "sub_root_id": None,
             }
             _emit_subagent(info, status=status, result=result)
             return await original(self, task_id, label, task, result, origin, status, *args, **kwargs)
@@ -725,6 +863,107 @@ def _install_plugin_load(PluginRegistry: type) -> bool:
     return ok1 or ok2
 
 
+# ── P1 probe: skill.inject (skill BODY auto-injected into the system prompt) ─
+#
+# Two segment builders render skill bodies into the live prompt (NOT the
+# ContextBuilder.build_system_prompt path — that one only runs for token-budget
+# estimation and its output is discarded). We wrap the segment builds, which
+# fire exactly once per turn each, and emit only when something was injected.
+
+
+def _emit_skill_inject(*, via: str, names: list, ids: list, sources: dict, body_len: int, start: str) -> None:
+    tc = ctx.current()
+    trace_id = tc.trace_id if tc else ctx.new_trace_id()
+    parent = tc.parent_span_id if tc else None
+    sk = tc.session_key if tc else None
+    channel = tc.channel if tc else None
+    chat_id = tc.chat_id if tc else None
+    meta = {"traceId": trace_id, "sessionKey": sk}
+    art = spans.persist_artifact(
+        "skill-inject", meta,
+        {"via": via, "skills": [{"name": n, "id": i} for n, i in zip(names, ids)],
+         "sources": sources, "body_len": body_len},
+        label=f"skill-inject:{via}",
+    )
+    attrs = {
+        "skill.inject.via": via,
+        "skill.inject.count": len(ids),
+        "skill.inject.names": names,
+        "skill.inject.ids": ids,
+        "skill.inject.sources": sources,
+        "skill.inject.body_len": body_len,
+        **spans.artifact_attributes("skill.inject", art),
+    }
+    spans.emit(spans.build_span(
+        "skill.inject", "skills",
+        trace_id=trace_id, span_id=ctx.new_span_id(), parent_span_id=parent,
+        session_key=sk, channel=channel, chat_id=chat_id,
+        start_time=start, end_time=spans.now_iso(),
+        status_code="OK", status_message="",
+        attributes=attrs,
+        events=[{"time": start, "name": "skill.inject"}],
+    ))
+
+
+def _install_active_skill_inject(ActiveSkillsSegmentBuilder: type) -> bool:
+    """``# Active Skills`` — ``always: true`` skills, force-injected every turn."""
+    def factory(original):
+        async def wrapper(self, *args, **kwargs):
+            start = spans.now_iso()
+            result = await original(self, *args, **kwargs)
+            try:
+                if result is not None and getattr(result, "text", ""):
+                    metas = list(self._skills.get_always_skills() or [])
+                    cfg = getattr(self._skills, "_config", None)
+                    always_max = getattr(cfg, "always_max", 5) or 5
+                    if always_max:
+                        metas = metas[:always_max]
+                    if metas:
+                        _emit_skill_inject(
+                            via="active_skills",
+                            names=[getattr(m, "name", None) for m in metas],
+                            ids=[str(getattr(m, "id", "")) for m in metas],
+                            sources=dict(Counter((getattr(m, "source", None) or "?") for m in metas)),
+                            body_len=len(result.text), start=start,
+                        )
+            except Exception:  # noqa: BLE001 — telemetry must never break assembly
+                pass
+            return result
+        return wrapper
+
+    return _wrap(ActiveSkillsSegmentBuilder, "build", factory, expect_params=["ctx"])
+
+
+def _install_skills_segment_inject(SkillsSegmentBuilder: type) -> bool:
+    """``# Skills`` — rewriter → router → gate selected skills' bodies.
+
+    The build's returned ``Segment.meta`` already carries exactly what we want:
+    ``injected_skill_ids`` (the gate-selected skills whose body was rendered)
+    and ``skill_hits_by_source``.
+    """
+    def factory(original):
+        async def wrapper(self, *args, **kwargs):
+            start = spans.now_iso()
+            result = await original(self, *args, **kwargs)
+            try:
+                seg_meta = (getattr(result, "meta", None) or {}) if result is not None else {}
+                ids = list(seg_meta.get("injected_skill_ids") or [])
+                if ids:
+                    _emit_skill_inject(
+                        via="skills_segment",
+                        names=[str(i).split("/")[-1] for i in ids],
+                        ids=ids,
+                        sources=dict(seg_meta.get("skill_hits_by_source") or {}),
+                        body_len=len(getattr(result, "text", "") or ""), start=start,
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+            return result
+        return wrapper
+
+    return _wrap(SkillsSegmentBuilder, "build", factory, expect_params=["ctx"])
+
+
 # ── install / uninstall ─────────────────────────────────────────────────────
 
 
@@ -745,6 +984,9 @@ def install() -> dict[str, bool]:
     _probe("memory.consolidate", "everclaw.memory_engine.consolidate.consolidator", "MemoryConsolidator", _install_memory_consolidate)
     _probe("subagent", "everclaw.agent.subagent.manager", "SubagentManager", _install_subagent)
     _probe("plugin.load", "everclaw.plugin.registry", "PluginRegistry", _install_plugin_load)
+    # P1 — skill injection (body rendered into the system prompt, no tool call)
+    _probe("skill.inject.active", "everclaw.context_engine.segments.active_skills", "ActiveSkillsSegmentBuilder", _install_active_skill_inject)
+    _probe("skill.inject.skills", "everclaw.context_engine.segments.skills", "SkillsSegmentBuilder", _install_skills_segment_inject)
     _done = True
     s = summary()
     logger.info("everclaw-tracing installed: %s", s)
