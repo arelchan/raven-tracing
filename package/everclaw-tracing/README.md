@@ -58,10 +58,10 @@ tracing everclaw    # opens the browser, grouped by channel → session → turn
 
 ## Scope
 
-- **P0 (this release):** `session.turn`, `llm.call` (full usage/cost), `tool.call`,
-  `skill.use` / `skill.read` — full-fidelity main chain.
-- **P1 (next):** `memory.recall/store/extract/consolidate/profile_refresh/feedback`,
-  `subagent.call` (nested child spans), `plugin.load`.
+- **Main chain:** `session.turn`, `llm.call` (full usage/cost, streaming + non-streaming),
+  `tool.call`, `skill.use` / `skill.read` / `skill.inject` — full fidelity.
+- **Extended (also live):** `memory.recall/store/extract/consolidate/profile_refresh/feedback`,
+  `subagent.call` (emitted as its own trace, back-linked to the parent), `plugin.load`.
 
 See `../EVERCLAW_AUTOTRACE_DESIGN.md` for the full design and per-node I/O definitions.
 

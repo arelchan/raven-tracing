@@ -9,7 +9,7 @@ This skill installs **everclaw-tracing** (a zero-core-edit observability plugin)
 **viewer**. Once installed into the same Python env as everclaw, every conversation turn is traced,
 grouped by **channel → session → turn**, with these span nodes:
 `session.turn` · `llm.call` (provider/model/tokens/cache/cost; **streaming and non-streaming**) ·
-`tool.call` · `skill.use`/`skill.read` · `memory.recall/store/extract/consolidate/profile_refresh/feedback` ·
+`tool.call` · `skill.use`/`skill.read`/`skill.inject` · `memory.recall/store/extract/consolidate/profile_refresh/feedback` ·
 `subagent.call` · `plugin.load`.
 
 Bundled in this skill folder:
@@ -58,10 +58,10 @@ Tell the user to restart it (e.g. quit the TUI and `uv run everclaw tui` again).
    boot = [json.loads(l) for l in log.read_text().splitlines() if l.strip() and '"tracing.bootstrap"' in l]
    probes = boot[-1]["attributes"]["plugin.probes"] if boot else {}
    ok = sum(1 for v in probes.values() if v)
-   print(f"probes bound: {ok}/14", "OK" if ok >= 13 else "(some disabled — version drift, see Troubleshooting)")
+   print(f"probes bound: {ok}/16", "OK" if ok >= 15 else "(some disabled — version drift, see Troubleshooting)")
    PY
    ```
-   Expect `probes bound: 14/14`.
+   Expect `probes bound: 16/16`.
 
 ### Step 5 — View the traces
 Run any everclaw turn (tui / agent / gateway), then launch the bundled viewer:
@@ -94,7 +94,7 @@ Note: the viewer reads on page load and does NOT auto-poll — refresh the brows
 - **No spans / not listed in `everclaw plugins`** → wrong env (Step 1), or pruned by `uv sync` (caveat 3).
 - **Only a small `llm.call` (the SkillForge rewriter) shows, no main model call** → the plugin predates
   the streaming-capture fix, or the running process wasn't restarted (Step 3). Reinstall + restart.
-- **`probes bound: N/14` with N<14** → version drift (caveat 4); bound probes still trace.
+- **`probes bound: N/16` with N<16** → version drift (caveat 4); bound probes still trace.
 - **Viewer panel empty / stale** → refresh the browser (no auto-poll); confirm a turn actually ran.
 
 ## How it works (for the curious)
