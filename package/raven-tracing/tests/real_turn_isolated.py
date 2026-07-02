@@ -1,16 +1,16 @@
-"""Isolated REAL-everclaw turn with a STUB provider — zero API credit, zero pollution.
+"""Isolated REAL-raven turn with a STUB provider — zero API credit, zero pollution.
 
-Runs everclaw's REAL AgentLoop._process_message / ToolRegistry.execute / context
+Runs raven's REAL AgentLoop._process_message / ToolRegistry.execute / context
 assembly with our probes active (loaded via PYTHONPATH, NOT installed into the
-everclaw venv), an isolated workspace, and traces to an isolated dir. Proves the
-probes fire on LIVE everclaw code and build a correct span tree — without any
+raven venv), an isolated workspace, and traces to an isolated dir. Proves the
+probes fire on LIVE raven code and build a correct span tree — without any
 network/LLM call.
 
-Run (nothing is written into the everclaw repo or its venv) — from an everclaw
+Run (nothing is written into the raven repo or its venv) — from an raven
 checkout that has a usable .venv, with this package's dir on PYTHONPATH:
 
-  cd <everclaw-repo>
-  EVERCLAW_TRACING_DIR=/tmp/ectrace-real \
+  cd <raven-repo>
+  RAVEN_TRACING_DIR=/tmp/ectrace-real \
   PYTHONPATH=<path-to-this-package> \
   .venv/bin/python <path-to-this-package>/tests/real_turn_isolated.py
 """
@@ -23,13 +23,13 @@ import os
 import tempfile
 from pathlib import Path
 
-import everclaw_tracing  # noqa: F401 — import installs the probes
-from everclaw_tracing import instrument
+import raven_tracing  # noqa: F401 — import installs the probes
+from raven_tracing import instrument
 
-from everclaw.agent.loop import AgentLoop
-from everclaw.bus.events import InboundMessage
-from everclaw.bus.queue import MessageBus
-from everclaw.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from raven.agent.loop import AgentLoop
+from raven.bus.events import InboundMessage
+from raven.bus.queue import MessageBus
+from raven.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 
 class StubProvider(LLMProvider):
@@ -75,7 +75,7 @@ asyncio.run(main())
 
 
 # ── render the emitted span tree ────────────────────────────────────────────
-sd = Path(os.environ["EVERCLAW_TRACING_DIR"]) / "logs" / "audit-spans.log"
+sd = Path(os.environ["RAVEN_TRACING_DIR"]) / "logs" / "audit-spans.log"
 spans = [json.loads(line) for line in sd.read_text().splitlines() if line.strip()]
 ids = {s["spanId"] for s in spans}
 

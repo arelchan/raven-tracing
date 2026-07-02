@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "raven-tracing"
+version = "0.1.0"
+description = "Pluggable, non-invasive tracing for Raven via import-time auto-instrumentation (audit.span.v1)."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+# Raven discovers plugins through this entry-point group. The value is the
+# bare package name; Raven reads ``raven-plugin.toml`` from inside it via
+# importlib.resources, which imports this package — that import is our hook to
+# install auto-instrumentation (see raven_tracing/__init__.py).
+[project.entry-points."raven.plugins"]
+raven_tracing = "raven_tracing"
+
+[tool.hatch.build.targets.wheel]
+packages = ["raven_tracing"]
+
+# Ship the manifest as package data so importlib.resources can find it; ship a
+# .pth that imports the package at interpreter startup so EVERY raven command
+# (tui / gateway / agent / cron) auto-instruments — not only the ones that run
+# plugin discovery (e.g. `raven tui` does not).
+[tool.hatch.build.targets.wheel.force-include]
+"raven_tracing/raven-plugin.toml" = "raven_tracing/raven-plugin.toml"
+"raven_tracing_autoload.pth" = "raven_tracing_autoload.pth"

@@ -25,7 +25,7 @@ class TraceCtx:
 
 
 _CTX: contextvars.ContextVar[TraceCtx | None] = contextvars.ContextVar(
-    "everclaw_tracing_ctx", default=None
+    "raven_tracing_ctx", default=None
 )
 
 

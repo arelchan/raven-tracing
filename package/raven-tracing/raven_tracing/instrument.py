@@ -1,8 +1,8 @@
-"""Import-time auto-instrumentation of EverClaw (the OpenTelemetry pattern).
+"""Import-time auto-instrumentation of Raven (the OpenTelemetry pattern).
 
 We monkeypatch a small set of stable choke points so a pip-installed plugin can
-observe the agent with zero edits to everclaw source. Every patch is guarded:
-a signature mismatch (an everclaw refactor) disables that *single* probe and
+observe the agent with zero edits to raven source. Every patch is guarded:
+a signature mismatch (an raven refactor) disables that *single* probe and
 logs a warning — it never crashes the host, and other probes keep working.
 
 P0 probes (full fidelity):
@@ -37,7 +37,7 @@ from . import spans
 from . import usage as usage_mod
 from .store import preview_text
 
-logger = logging.getLogger("everclaw.plugin.everclaw-tracing")
+logger = logging.getLogger("raven.plugin.raven-tracing")
 
 # Skill tools surface as ordinary tool calls; we re-type them to `skills`.
 _SKILL_TOOLS = {"use_skill", "read_skill"}
@@ -70,28 +70,28 @@ def _wrap(target_cls: type, method_name: str, factory: Callable[[Callable], Call
     """Patch ``target_cls.method_name`` with ``factory(original)``.
 
     Guarded by an async-ness + signature check on ``expect_params`` so an
-    everclaw refactor degrades to a disabled probe, never a crash.
+    raven refactor degrades to a disabled probe, never a crash.
     """
     key = f"{target_cls.__name__}.{method_name}"
     try:
         original = getattr(target_cls, method_name)
         if not inspect.iscoroutinefunction(original):
-            logger.warning("everclaw-tracing: %s is not async; probe disabled", key)
+            logger.warning("raven-tracing: %s is not async; probe disabled", key)
             return False
         params = set(inspect.signature(original).parameters)
         missing = [p for p in expect_params if p not in params]
         if missing:
-            logger.warning("everclaw-tracing: %s missing %s; probe disabled", key, missing)
+            logger.warning("raven-tracing: %s missing %s; probe disabled", key, missing)
             return False
         wrapper = factory(original)
         functools.update_wrapper(wrapper, original)
         setattr(target_cls, method_name, wrapper)
         _originals[key] = (target_cls, method_name, original)
         _installed[key] = True
-        logger.debug("everclaw-tracing: patched %s", key)
+        logger.debug("raven-tracing: patched %s", key)
         return True
     except Exception as e:  # noqa: BLE001
-        logger.warning("everclaw-tracing: failed to patch %s: %s", key, e)
+        logger.warning("raven-tracing: failed to patch %s: %s", key, e)
         return False
 
 
@@ -143,9 +143,9 @@ def _install_turn(AgentLoop: type) -> bool:
                 channel, chat_id = channel or ch2, chat_id or cid2
             root_id = ctx.new_span_id()
             start = spans.now_iso()
-            # everclaw renamed the turn payload: old `msg.content` became
+            # raven renamed the turn payload: old `msg.content` became
             # `TurnRequest.text`. `msg` is the positional arg (a TurnRequest on
-            # current everclaw). Accept either so the probe spans both versions.
+            # current raven). Accept either so the probe spans both versions.
             user_input = getattr(msg, "text", None)
             if user_input is None:
                 user_input = getattr(msg, "content", None)
@@ -202,7 +202,7 @@ def _install_turn(AgentLoop: type) -> bool:
                     ))
         return wrapper
 
-    # Guard on `session_key` only: everclaw's first positional arg was renamed
+    # Guard on `session_key` only: raven's first positional arg was renamed
     # (msg -> req) but binds positionally, so its name is irrelevant. Checking
     # for `msg` here used to disable the whole root-span probe after that
     # rename, orphaning every child span.
@@ -250,7 +250,7 @@ def _coerce_text(value: Any) -> str:
 def _llm_input_payload(provider: str, model: str | None, messages: Any, tools: Any) -> dict:
     """Artifact payload for the model-input card.
 
-    everclaw passes ONE flat ``messages`` list (system + prior turns + current).
+    raven passes ONE flat ``messages`` list (system + prior turns + current).
     We split it into three non-overlapping views for the viewer:
       - ``systemPrompt``: the system message,
       - ``prompt``: the latest user message (the current input to this call),
@@ -451,7 +451,7 @@ def _skill_name_from_path(path: str | None) -> str | None:
 def _skill_read_path(name: str, params: Any) -> str | None:
     """If a read_file targets a SKILL.md, return that path; else ``None``.
 
-    This is the discovery→injection follow-through: everclaw's summary mode
+    This is the discovery→injection follow-through: raven's summary mode
     tells the agent to ``read_file`` a skill's SKILL.md, and subagents (which
     only get the skill *catalog*) do the same. Those reads carry the real body
     into context but look like a plain file read — re-type them to skill.read.
@@ -554,7 +554,7 @@ def _wrap_sync(target_cls: type, method_name: str, factory: Callable[[Callable],
         params = set(inspect.signature(original).parameters)
         missing = [p for p in expect_params if p not in params]
         if missing:
-            logger.warning("everclaw-tracing: %s missing %s; probe disabled", key, missing)
+            logger.warning("raven-tracing: %s missing %s; probe disabled", key, missing)
             return False
         wrapper = factory(original)
         functools.update_wrapper(wrapper, original)
@@ -563,7 +563,7 @@ def _wrap_sync(target_cls: type, method_name: str, factory: Callable[[Callable],
         _installed[key] = True
         return True
     except Exception as e:  # noqa: BLE001
-        logger.warning("everclaw-tracing: failed to patch %s: %s", key, e)
+        logger.warning("raven-tracing: failed to patch %s: %s", key, e)
         return False
 
 
@@ -973,23 +973,23 @@ def install() -> dict[str, bool]:
     if _done:
         return summary()
     # P0 — full-fidelity main chain
-    _probe("llm", "everclaw.providers.base", "LLMProvider", _install_llm)
-    _probe("llm-stream", "everclaw.agent.loop.main", "AgentLoop", _install_llm_stream)
-    _probe("tool", "everclaw.agent.tools.registry", "ToolRegistry", _install_tool)
-    _probe("turn", "everclaw.agent.loop.main", "AgentLoop", _install_turn)
+    _probe("llm", "raven.providers.base", "LLMProvider", _install_llm)
+    _probe("llm-stream", "raven.agent.loop.main", "AgentLoop", _install_llm_stream)
+    _probe("tool", "raven.agent.tools.registry", "ToolRegistry", _install_tool)
+    _probe("turn", "raven.agent.loop.main", "AgentLoop", _install_turn)
     # P1 — memory (6 nodes), subagent, plugin.load
-    _probe("memory.recall", "everclaw.context_engine.segments.memory", "MemorySegmentBuilder", _install_memory_recall)
-    _probe("memory.store+feedback", "everclaw.agent.loop.main", "AgentLoop", _install_agentloop_memory)
-    _probe("memory.extract+profile", "everclaw.memory_engine.consolidate.consolidator", "MemoryStore", _install_memory_store_class)
-    _probe("memory.consolidate", "everclaw.memory_engine.consolidate.consolidator", "MemoryConsolidator", _install_memory_consolidate)
-    _probe("subagent", "everclaw.agent.subagent.manager", "SubagentManager", _install_subagent)
-    _probe("plugin.load", "everclaw.plugin.registry", "PluginRegistry", _install_plugin_load)
+    _probe("memory.recall", "raven.context_engine.segments.memory", "MemorySegmentBuilder", _install_memory_recall)
+    _probe("memory.store+feedback", "raven.agent.loop.main", "AgentLoop", _install_agentloop_memory)
+    _probe("memory.extract+profile", "raven.memory_engine.consolidate.consolidator", "MemoryStore", _install_memory_store_class)
+    _probe("memory.consolidate", "raven.memory_engine.consolidate.consolidator", "MemoryConsolidator", _install_memory_consolidate)
+    _probe("subagent", "raven.agent.subagent.manager", "SubagentManager", _install_subagent)
+    _probe("plugin.load", "raven.plugin.registry", "PluginRegistry", _install_plugin_load)
     # P1 — skill injection (body rendered into the system prompt, no tool call)
-    _probe("skill.inject.active", "everclaw.context_engine.segments.active_skills", "ActiveSkillsSegmentBuilder", _install_active_skill_inject)
-    _probe("skill.inject.skills", "everclaw.context_engine.segments.skills", "SkillsSegmentBuilder", _install_skills_segment_inject)
+    _probe("skill.inject.active", "raven.context_engine.segments.active_skills", "ActiveSkillsSegmentBuilder", _install_active_skill_inject)
+    _probe("skill.inject.skills", "raven.context_engine.segments.skills", "SkillsSegmentBuilder", _install_skills_segment_inject)
     _done = True
     s = summary()
-    logger.info("everclaw-tracing installed: %s", s)
+    logger.info("raven-tracing installed: %s", s)
     _emit_bootstrap(s)
     return s
 
@@ -999,7 +999,7 @@ def _probe(label: str, module: str, cls_name: str, installer: Callable[[type], b
         mod = __import__(module, fromlist=[cls_name])
         installer(getattr(mod, cls_name))
     except Exception as e:  # noqa: BLE001
-        logger.warning("everclaw-tracing: %s probe unavailable (%s): %s", label, module, e)
+        logger.warning("raven-tracing: %s probe unavailable (%s): %s", label, module, e)
 
 
 def summary() -> dict[str, bool]:
@@ -1013,7 +1013,7 @@ def _emit_bootstrap(s: dict[str, bool]) -> None:
             "tracing.bootstrap", "plugin_load",
             trace_id=ctx.new_trace_id(), span_id=ctx.new_span_id(), parent_span_id=None,
             start_time=start, end_time=start,
-            attributes={"plugin.id": "everclaw-tracing", "plugin.probes": s},
+            attributes={"plugin.id": "raven-tracing", "plugin.probes": s},
         ))
     except Exception:  # noqa: BLE001
         pass

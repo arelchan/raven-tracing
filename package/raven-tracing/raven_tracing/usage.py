@@ -1,8 +1,8 @@
 """LLM usage normalization + best-effort cost.
 
 Mirrors ``AgentLoop._build_usage_snapshot`` semantics (fresh-vs-total prompt
-token convention differs by provider). Cost reuses everclaw's own pricing table
-when importable; if everclaw moves it, cost degrades to ``None`` — never raises.
+token convention differs by provider). Cost reuses raven's own pricing table
+when importable; if raven moves it, cost degrades to ``None`` — never raises.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ def _cost(model: str | None, fresh: int, out: int, cache_read: int, cache_write:
     if not model:
         return None
     try:
-        from everclaw.token_wise.pricing import estimate_cost_usd
+        from raven.token_wise.pricing import estimate_cost_usd
 
         return estimate_cost_usd(model, fresh, out, cache_read, cache_write)
     except Exception:  # noqa: BLE001 — pricing is best-effort; never break tracing

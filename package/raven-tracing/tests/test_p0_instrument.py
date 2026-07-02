@@ -1,6 +1,6 @@
-"""Offline P0+P1 verification — no real EverClaw, no API calls (cost-free).
+"""Offline P0+P1 verification — no real Raven, no API calls (cost-free).
 
-Fake classes mirror everclaw's real method signatures (verified against source).
+Fake classes mirror raven's real method signatures (verified against source).
 We install every probe onto them, drive one full turn that exercises
 LLM / tool / skill / memory(×6) / subagent, plus a boot-time plugin.load, then
 assert the emitted audit.span.v1 spans form the right tree with full I/O and
@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
-# ── fakes mirroring everclaw's real signatures ──────────────────────────────
+# ── fakes mirroring raven's real signatures ──────────────────────────────
 
 
 @dataclass
@@ -198,13 +198,13 @@ def _read_spans(state_dir: Path) -> list[dict]:
 
 def run() -> None:
     tmp = tempfile.mkdtemp(prefix="ectrace-")
-    os.environ["EVERCLAW_TRACING_DIR"] = tmp
-    os.environ["EVERCLAW_TRACING"] = "1"
+    os.environ["RAVEN_TRACING_DIR"] = tmp
+    os.environ["RAVEN_TRACING"] = "1"
 
     for m in list(sys.modules):
-        if m.startswith("everclaw_tracing"):
+        if m.startswith("raven_tracing"):
             del sys.modules[m]
-    from everclaw_tracing import instrument
+    from raven_tracing import instrument
 
     # install P0 + P1 probes onto the fakes
     instrument._install_llm(FakeProvider)

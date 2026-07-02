@@ -1,7 +1,7 @@
 """audit.span.v1 span construction + emission.
 
 One viewer renders any framework's traces because every collector writes this
-same schema. EverClaw adds ``span.type`` values beyond the original five
+same schema. Raven adds ``span.type`` values beyond the original five
 (``memory_*``, ``plugin_load``, ``skills`` for skill.use) — see the design doc.
 """
 
@@ -14,7 +14,7 @@ from . import config
 from .store import TraceStore
 
 SCHEMA_VERSION = "audit.span.v1"
-FRAMEWORK = "everclaw"
+FRAMEWORK = "raven"
 
 _store: TraceStore | None = None
 
@@ -52,7 +52,7 @@ def build_span(
         "framework": FRAMEWORK,
         # session.id + channel.id are the keys the shared viewer groups on
         # (audit.span.v1 common attrs). Mirror session_key/channel into them
-        # so everclaw traces group by conversation → turn like the others.
+        # so raven traces group by conversation → turn like the others.
         "session.id": session_key,
         "session.key": session_key,
         "channel": channel,

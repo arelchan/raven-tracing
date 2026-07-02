@@ -1,10 +1,10 @@
 [plugin]
-id                 = "everclaw-tracing"
+id                 = "raven-tracing"
 version            = "0.1.0"
-display_name       = "EverClaw Tracing"
-everclaw           = ">=0.1"
+display_name       = "Raven Tracing"
+raven           = ">=0.1"
 enabled_by_default = true
 
 # No contributions: this plugin observes via import-time auto-instrumentation,
-# not via a memory_backend / tool contribution. EverClaw still imports this
+# not via a memory_backend / tool contribution. Raven still imports this
 # package during discovery (to read this manifest), which installs the probes.
