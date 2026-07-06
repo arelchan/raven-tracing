@@ -830,11 +830,95 @@ function serveStatic(reqPath, res) {
   sendText(res, 200, fs.readFileSync(filePath, 'utf8'), typeByExt[ext] || 'text/plain; charset=utf-8');
 }
 
+// Content search across all spans: title/subtitle/attributes plus the FULL text
+// of every artifact a span references (messages, recalled memories, deposits).
+// Fuzzy = case-insensitive, whitespace-split terms, all must match (AND).
+const MAX_SEARCH_RESULTS = 50;
+const MAX_ARTIFACT_SEARCH_BYTES = 512 * 1024;
+
+function artifactTextForSearch(filePath) {
+  if (!filePath || !isSafeArtifactPath(filePath)) return '';
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile() || stat.size > MAX_ARTIFACT_SEARCH_BYTES) return '';
+    return fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+function makeSnippet(text, term, radius = 60) {
+  const idx = text.toLowerCase().indexOf(term);
+  if (idx < 0) return '';
+  const start = Math.max(0, idx - radius);
+  const end = Math.min(text.length, idx + term.length + radius);
+  const head = start > 0 ? '…' : '';
+  const tail = end < text.length ? '…' : '';
+  return (head + text.slice(start, end) + tail).replace(/\s+/g, ' ').trim();
+}
+
+function searchSpans(query) {
+  const terms = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return [];
+  const results = [];
+  const data = buildSessions();
+  for (const session of data.sessions) {
+    for (const trace of session.traces || []) {
+      for (const span of trace.spans || []) {
+        const attrs = span.attributes || {};
+        // pieces: [label, text]; artifacts carry the full node input/output.
+        const pieces = [
+          ['title', [span.displayTitle, span.displaySubtitle, span.name].filter(Boolean).join(' ')],
+          ['attributes', JSON.stringify(attrs)]
+        ];
+        for (const [key, value] of Object.entries(attrs)) {
+          if (key.endsWith('artifact_path') && typeof value === 'string') {
+            const text = artifactTextForSearch(value);
+            if (text) pieces.push([key.replace('.artifact_path', ''), text]);
+          }
+        }
+        const combined = pieces.map(([, text]) => text).join('\n').toLowerCase();
+        if (!terms.every((term) => combined.includes(term))) continue;
+        // Snippet from the most specific piece hit by the first term (prefer artifacts).
+        let snippet = '';
+        let field = '';
+        for (const [label, text] of pieces.slice(2).concat([pieces[1], pieces[0]])) {
+          snippet = makeSnippet(text, terms[0]);
+          if (snippet) {
+            field = label;
+            break;
+          }
+        }
+        results.push({
+          sessionId: session.sessionId,
+          traceKey: trace.traceKey,
+          traceId: trace.traceId,
+          spanId: span.spanId,
+          name: span.name,
+          title: span.displayTitle,
+          subtitle: span.displaySubtitle,
+          startTime: span.startTime,
+          field,
+          snippet
+        });
+        if (results.length >= MAX_SEARCH_RESULTS * 4) break;
+      }
+    }
+  }
+  results.sort((a, b) => parseTime(b.startTime) - parseTime(a.startTime));
+  return results.slice(0, MAX_SEARCH_RESULTS);
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
 
   if (url.pathname === '/api/health') {
     sendJson(res, 200, { ok: true, port: PORT, stateDir: STATE_DIR });
+    return;
+  }
+
+  if (url.pathname === '/api/search') {
+    sendJson(res, 200, { results: searchSpans(url.searchParams.get('q') || '') });
     return;
   }
 

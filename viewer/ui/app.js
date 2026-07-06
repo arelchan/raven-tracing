@@ -6,6 +6,8 @@ const state = {
   selectedSpanId: null,
   selectedTab: 'content',
   search: '',
+  contentResults: null,
+  highlightScrollPending: false,
   agent: 'all',
   provider: 'all',
   model: 'all',
@@ -39,6 +41,7 @@ const elements = {
   traceMeta: document.getElementById('traceMeta'),
   detailsTitle: document.getElementById('detailsTitle'),
   searchInput: document.getElementById('searchInput'),
+  contentSearchResults: document.getElementById('contentSearchResults'),
   agentFilter: document.getElementById('agentFilter'),
   providerFilter: document.getElementById('providerFilter'),
   modelFilter: document.getElementById('modelFilter'),
@@ -410,6 +413,116 @@ function jumpToTraceByTraceId(traceId, spanId) {
     return true;
   }
   return false;
+}
+
+// ── Content search (fuzzy locate across node inputs/outputs) ────────────────
+// Server-side /api/search covers span attributes + full artifact text; here we
+// render the hit list, navigate to the hit span, and highlight matched terms.
+
+function contentSearchTerms() {
+  const query = state.search.trim();
+  if (query.length < 2) return [];
+  return query.toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+function highlightText(text, terms) {
+  if (!text) return '';
+  const lower = text.toLowerCase();
+  const ranges = [];
+  for (const term of terms) {
+    let idx = 0;
+    while (term && (idx = lower.indexOf(term, idx)) !== -1) {
+      ranges.push([idx, idx + term.length]);
+      idx += term.length;
+    }
+  }
+  if (!ranges.length) return escapeHtml(text);
+  ranges.sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const range of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+    else merged.push([...range]);
+  }
+  let out = '';
+  let pos = 0;
+  for (const [start, end] of merged) {
+    out += escapeHtml(text.slice(pos, start));
+    out += `<mark class="content-hit-mark">${escapeHtml(text.slice(start, end))}</mark>`;
+    pos = end;
+  }
+  return out + escapeHtml(text.slice(pos));
+}
+
+async function runContentSearch(query) {
+  try {
+    const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+    const payload = await res.json();
+    if (state.search.trim() !== query) return;
+    state.contentResults = payload.results || [];
+  } catch {
+    state.contentResults = [];
+  }
+  renderContentSearchResults();
+}
+
+function renderContentSearchResults() {
+  const box = elements.contentSearchResults;
+  if (!box) return;
+  const terms = contentSearchTerms();
+  if (!terms.length || state.contentResults == null) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+  box.hidden = false;
+  const results = state.contentResults;
+  const items = results
+    .map(
+      (hit) => `
+      <button class="content-hit-item" type="button"
+        data-session-id="${escapeHtml(hit.sessionId)}"
+        data-trace-key="${escapeHtml(hit.traceKey)}"
+        data-span-id="${escapeHtml(hit.spanId)}">
+        <span class="content-hit-title">${escapeHtml(hit.title || hit.name)}${
+          hit.subtitle ? ` <span class="content-hit-sub">${escapeHtml(hit.subtitle)}</span>` : ''
+        }</span>
+        <span class="content-hit-snippet">${highlightText(hit.snippet || '', terms)}</span>
+      </button>`
+    )
+    .join('');
+  box.innerHTML =
+    `<div class="content-hit-head">内容命中 ${results.length}${results.length >= 50 ? '+' : ''}</div>` +
+    (items || '<div class="content-hit-empty">无内容命中</div>');
+}
+
+function applyDetailHighlights() {
+  const container = elements.detailsBody;
+  if (!container) return;
+  container.querySelectorAll('mark.content-hit-mark').forEach((mark) => {
+    const parent = mark.parentNode;
+    parent.replaceChild(document.createTextNode(mark.textContent), mark);
+    parent.normalize();
+  });
+  const terms = contentSearchTerms();
+  if (!terms.length) return;
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const textNodes = [];
+  while (walker.nextNode()) textNodes.push(walker.currentNode);
+  for (const node of textNodes) {
+    const text = node.nodeValue;
+    if (!text) continue;
+    const lower = text.toLowerCase();
+    if (!terms.some((term) => lower.includes(term))) continue;
+    const wrapper = document.createElement('span');
+    wrapper.innerHTML = highlightText(text, terms);
+    node.parentNode.replaceChild(wrapper, node);
+  }
+  if (state.highlightScrollPending) {
+    state.highlightScrollPending = false;
+    const first = container.querySelector('mark.content-hit-mark');
+    if (first) first.scrollIntoView({ block: 'center' });
+  }
 }
 
 function currentApiCall() {
@@ -2193,6 +2306,7 @@ async function renderDetails() {
     elements.detailsBody.innerHTML = renderMetadata(span);
     hydrateOpenDetails();
     restoreScrollState();
+    applyDetailHighlights();
     return;
   }
 
@@ -2200,6 +2314,7 @@ async function renderDetails() {
     elements.detailsBody.innerHTML = renderRaw(span, artifacts);
     hydrateOpenDetails();
     restoreScrollState();
+    applyDetailHighlights();
     return;
   }
 
@@ -2211,6 +2326,7 @@ async function renderDetails() {
   });
   hydrateOpenDetails();
   restoreScrollState();
+  applyDetailHighlights();
 }
 
 function currentDetailsSignature() {
@@ -2283,7 +2399,7 @@ function render() {
     });
   } else {
   elements.listTitle.textContent = '会话列表';
-  elements.searchInput.placeholder = 'session / trace / agent';
+  elements.searchInput.placeholder = 'session / trace / 内容关键词';
     renderSessionList();
     renderTraceList();
     const nextDetailsSignature = currentDetailsSignature();
@@ -2344,8 +2460,30 @@ function startAutoRefresh() {
   }, AUTO_REFRESH_MS);
 }
 
+let contentSearchTimer = null;
 elements.searchInput.addEventListener('input', (event) => {
   state.search = event.target.value;
+  state.detailsRenderSignature = null;
+  render();
+  applyDetailHighlights();
+  if (contentSearchTimer) clearTimeout(contentSearchTimer);
+  const query = state.search.trim();
+  if (query.length < 2) {
+    state.contentResults = null;
+    renderContentSearchResults();
+    return;
+  }
+  contentSearchTimer = setTimeout(() => runContentSearch(query), 250);
+});
+
+elements.contentSearchResults.addEventListener('click', (event) => {
+  const item = event.target.closest('[data-span-id]');
+  if (!item) return;
+  state.appView = 'trace';
+  state.selectedSessionId = item.dataset.sessionId;
+  state.selectedTraceKey = item.dataset.traceKey;
+  state.selectedSpanId = item.dataset.spanId;
+  state.highlightScrollPending = true;
   state.detailsRenderSignature = null;
   render();
 });
