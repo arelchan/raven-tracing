@@ -1,5 +1,6 @@
 const state = {
   data: null,
+  descriptors: {},
   appView: 'trace',
   selectedSessionId: null,
   selectedTraceKey: null,
@@ -973,93 +974,63 @@ function renderHistoryMessageItem(item) {
 
 function renderModelInputCard(span, artifacts) {
   if (span.name !== 'llm.call') return '';
-  const llmInput = artifactByLabel(artifacts, 'Model Input')?.parsed;
-  if (!llmInput) return '';
-
-  const prompt = llmInput.prompt || '';
-  const systemPrompt = llmInput.systemPrompt || '';
-  const historyMessages = Array.isArray(llmInput.historyMessages) ? llmInput.historyMessages : [];
-  const historyItems = historyMessages.map(summarizeHistoryMessage);
-  const promptSkills = parsePromptSkillEntries(span, artifacts);
-
+  const inp = artifactByLabel(artifacts, 'Model Input')?.parsed;
+  if (!inp) return '';
+  // Show the ACTUAL request sent to the model — tools + the raw messages list
+  // (inp.messages is the ground truth), not a system/history split. Model /
+  // provider / token usage already live in the top hero block, so not repeated.
+  const messages = Array.isArray(inp.messages) ? inp.messages : [];
+  const tools = Array.isArray(inp.tools) ? inp.tools : [];
+  const note = `${messages.length} messages${tools.length ? ` · ${tools.length} tools` : ''}`;
+  const toolsBlock = tools.length
+    ? `
+      <details class="model-diagnostic-details" data-detail-key="${escapeHtml(detailKey(span, 'req-tools'))}">
+        <summary class="model-panel-head"><strong>tools</strong> <span class="summary-chip">${tools.length}</span></summary>
+        <pre class="structured-pre">${escapeHtml(
+          tools
+            .map((t) => {
+              const fn = (t && t.function) || t || {};
+              return `- ${fn.name || '?'}${fn.description ? `: ${fn.description}` : ''}`;
+            })
+            .join('\n')
+        )}</pre>
+      </details>`
+    : '';
   return `
-    <article class="content-card wide-card content-card-model-input">
-      <header>
-        <h4>Model Input</h4>
-      </header>
-      <div class="model-input-layout">
-        <section class="model-panel">
-          <div class="model-panel-head">
-            <strong>Request</strong>
-          </div>
-          <pre class="structured-pre">${escapeHtml(prompt || '(empty prompt)')}</pre>
-        </section>
-        ${
-          promptSkills.length
-            ? `
-              <section class="model-panel wide-panel">
-                <details class="skill-summary-details" data-detail-key="${escapeHtml(detailKey(span, 'skills-in-prompt'))}">
-                  <summary class="model-panel-head">
-                    <strong>Skills In Prompt</strong>
-                    <div class="overview-tags">
-                      <span class="summary-chip">${promptSkills.length} skills</span>
-                    </div>
-                  </summary>
-                  <p class="content-note">这里只展示这次 model call 带进 prompt 的 skill 名称和说明，不代表已经实际读取。</p>
-                  <div class="skill-summary-list">
-                    ${promptSkills
-                      .map(
-                        (skill) => `
-                          <article class="skill-summary-item">
-                            <div class="skill-summary-head">
-                              <span class="skill-chip">${escapeHtml(skill.name)}</span>
-                            </div>
-                            ${
-                              skill.description
-                                ? `<p class="skill-summary-desc">${escapeHtml(skill.description)}</p>`
-                                : '<p class="skill-summary-desc muted">没有解析到 description。</p>'
-                            }
-                          </article>
-                        `
-                      )
-                      .join('')}
-                  </div>
-                </details>
-              </section>
-            `
-            : ''
-        }
-        <section class="model-panel wide-panel">
-          <details class="model-diagnostic-details" data-detail-key="${escapeHtml(detailKey(span, 'system-prompt'))}">
-            <summary class="model-panel-head">
-              <strong>System Prompt</strong>
-              <div class="overview-tags">
-                <span class="summary-chip">${systemPrompt.length} chars</span>
-              </div>
-            </summary>
-            <pre class="structured-pre">${escapeHtml(systemPrompt || '(empty system prompt)')}</pre>
-          </details>
-        </section>
-        <section class="model-panel wide-panel">
-          <details class="model-diagnostic-details" data-detail-key="${escapeHtml(detailKey(span, 'history'))}">
-            <summary class="model-panel-head">
-              <strong>History</strong>
-              <div class="overview-tags">
-                <span class="summary-chip">${historyItems.length} messages</span>
-              </div>
-            </summary>
-            <div class="history-list">
-              ${
-                historyItems.length
-                  ? historyItems.map(renderHistoryMessageItem).join('')
-                  : '<div class="trace-tree-note">这次模型调用没有携带 historyMessages。</div>'
-              }
-            </div>
-          </details>
-        </section>
-      </div>
-    </article>
-  `;
+    <article class="content-card wide-card">
+      <header><h4>Model Input</h4><span class="card-note">${escapeHtml(note)}</span></header>
+      ${toolsBlock}
+      ${renderMessages(messages)}
+    </article>`;
+}
+
+// One message exactly as sent to the model: role header + content (string or
+// content blocks) + any tool_calls, mirroring the provider payload.
+function renderRequestMessage(m) {
+  if (!m || typeof m !== 'object') return String(m);
+  const role = m.role || '?';
+  const name = m.name ? ` (${m.name})` : '';
+  let body = '';
+  const c = m.content;
+  if (typeof c === 'string') body = c;
+  else if (Array.isArray(c))
+    body = c
+      .map((b) => (b && typeof b === 'object' ? (b.type === 'text' ? b.text || '' : `[${b.type || 'block'}]`) : String(b)))
+      .join('\n');
+  else if (c != null) body = JSON.stringify(c);
+  let calls = '';
+  if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
+    calls =
+      '\n' +
+      m.tool_calls
+        .map((tc) => {
+          const fn = (tc && tc.function) || {};
+          const args = typeof fn.arguments === 'string' ? fn.arguments : JSON.stringify(fn.arguments || {});
+          return `  → ${fn.name || '?'}(${args})`;
+        })
+        .join('\n');
+  }
+  return `[${role}${name}]\n${body}${calls}`;
 }
 
 function assistantContentText(message) {
@@ -1105,29 +1076,16 @@ function renderModelOutputCard(span, artifacts) {
 
   const assistantTexts = Array.isArray(llmOutput.assistantTexts) ? llmOutput.assistantTexts : [];
   const finalMessage = assistantContentText(llmOutput.lastAssistant) || llmOutput.output || assistantTexts[assistantTexts.length - 1] || '';
-  const steps = assistantTexts.length ? assistantTexts : (finalMessage ? [finalMessage] : []);
-
+  const steps = assistantTexts.length ? assistantTexts : finalMessage ? [finalMessage] : [];
+  const body = steps.length
+    ? renderMessages(steps.map((t) => ({ role: 'assistant', content: t })))
+    : preBody('(no assistant output)');
+  const note = steps.length > 1 ? `${steps.length} steps` : '';
   return `
-    <article class="content-card wide-card content-card-model-output">
-      <header>
-        <h4>Model Output</h4>
-      </header>
-      <div class="model-input-layout">
-        <section class="model-panel wide-panel">
-          <div class="model-panel-head">
-            <strong>Assistant Steps</strong>
-          </div>
-          <div class="history-list">
-            ${
-              steps.length
-                ? steps.map((text, index) => renderAssistantStep(text, index, steps.length)).join('')
-                : '<div class="trace-tree-note">这次没有拆分的 assistant steps。</div>'
-            }
-          </div>
-        </section>
-      </div>
-    </article>
-  `;
+    <article class="content-card wide-card">
+      <header><h4>Model Output</h4>${note ? `<span class="card-note">${escapeHtml(note)}</span>` : ''}</header>
+      ${body}
+    </article>`;
 }
 
 function renderToolCallCard(span, artifacts) {
@@ -1221,8 +1179,8 @@ function renderSubagentCallCard(span, artifacts) {
   const subTraceId = attrs['subagent.trace_id'] || null;
   const jumpCard = subTraceId
     ? `
-    <article class="content-card wide-card trace-jump-card">
-      <button type="button" class="trace-jump-btn" data-jump-trace-id="${escapeHtml(subTraceId)}">
+    <article class="content-card wide-card">
+      <button type="button" class="jump-link" data-jump-trace-id="${escapeHtml(subTraceId)}">
         → 打开 subagent 的完整 trace
       </button>
     </article>`
@@ -1254,8 +1212,8 @@ function renderSubagentRunCard(span) {
   // Back link: this trace is one subagent run; return to the turn that spawned it.
   const backCard = parentTraceId
     ? `
-    <article class="content-card wide-card trace-jump-card">
-      <button type="button" class="trace-jump-btn" data-jump-trace-id="${escapeHtml(parentTraceId)}"${parentSpanId ? ` data-jump-span-id="${escapeHtml(parentSpanId)}"` : ''}>
+    <article class="content-card wide-card">
+      <button type="button" class="jump-link" data-jump-trace-id="${escapeHtml(parentTraceId)}"${parentSpanId ? ` data-jump-span-id="${escapeHtml(parentSpanId)}"` : ''}>
         ← 返回主 trace
       </button>
     </article>`
@@ -1935,29 +1893,17 @@ function renderSkillReadCard(trace, span, artifacts) {
         evidence.followUps.length
           ? `
             <details class="model-diagnostic-details" data-detail-key="${escapeHtml(detailKey(span, 'follow-up'))}">
-              <summary class="model-panel-head">
-                <strong>Follow-up</strong>
-                <div class="overview-tags">
-                  <span class="summary-chip">${evidence.followUps.length} spans</span>
-                </div>
-              </summary>
-              <div class="evidence-timeline">
-                ${evidence.followUps
+              <summary class="model-panel-head"><strong>Follow-up</strong> <span class="summary-chip">${evidence.followUps.length} spans</span></summary>
+              <pre class="structured-pre">${escapeHtml(
+                evidence.followUps
                   .map(
-                    (follow) => `
-                      <div class="evidence-step">
-                        <span class="evidence-time">${escapeHtml(formatTime(follow.startTime))}</span>
-                        <span class="summary-chip evidence-chip">${escapeHtml(follow.displayTitle)}</span>
-                        ${
-                          follow.displaySubtitle
-                            ? `<span class="evidence-sub">${escapeHtml(follow.displaySubtitle)}</span>`
-                            : ''
-                        }
-                      </div>
-                    `
+                    (follow) =>
+                      `${formatTime(follow.startTime)}  ${follow.displayTitle}${
+                        follow.displaySubtitle ? `  ·  ${follow.displaySubtitle}` : ''
+                      }`
                   )
-                  .join('')}
-              </div>
+                  .join('\n')
+              )}</pre>
             </details>
           `
           : ''
@@ -1994,57 +1940,200 @@ function renderSessionTurnCard(trace, span) {
   const skills = Array.isArray(attrs['turn.skills']) ? attrs['turn.skills'] : [];
   const skillCount = attrs['turn.skill_count'] != null ? attrs['turn.skill_count'] : skills.length;
   const hasCaps = attrs['turn.tools'] !== undefined || attrs['turn.skills'] !== undefined || attrs['turn.plugin.backend'] !== undefined;
-  const chips = (arr) => arr.length ? arr.map((x) => `<span class="span-chip">${escapeHtml(String(x))}</span>`).join('') : '<span class="evidence-sub">—</span>';
-  const capsSection = hasCaps ? `
-        <section class="overview-row">
-          <div class="overview-title"><strong>loaded this turn</strong></div>
-          <div class="evidence-sub">plugins: ${pluginBackend ? `backend=<strong>${escapeHtml(pluginBackend)}</strong>` : 'backend=<strong>none</strong>'}${pluginTools.length ? ` · plugin tools: ${pluginTools.map((t) => escapeHtml(String(t))).join(', ')}` : ' · no plugin tools'}</div>
-          <div class="evidence-sub">tools (${tools.length}):</div>
-          <div class="overview-tags">${chips(tools)}</div>
-          <div class="evidence-sub">skills available (${skillCount}):</div>
-          <div class="overview-tags">${chips(skills)}</div>
-        </section>` : '';
+  const overview = [
+    `summary   ${agent} · ${trigger} triggered turn`,
+    `session   ${span.sessionId || '-'}`,
+    span.sessionKey && span.sessionKey !== span.sessionId ? `key       ${span.sessionKey}` : null,
+    sessionChainLabel(session) ? `chain     ${sessionChainLabel(session)}` : null,
+    span.runId ? `run       ${span.runId}` : null,
+    `time      ${start}  →  ${end}   (${duration})`
+  ]
+    .filter(Boolean)
+    .join('\n');
+  const callChips = [
+    `${summary.modelCalls} model`,
+    `${summary.toolCalls} tool`,
+    `${summary.subagents} subagent`,
+    `${summary.readSkills.length} skill.read`
+  ]
+    .map((c) => `<span class="summary-chip">${escapeHtml(c)}</span>`)
+    .join('');
+  const capsBlock = hasCaps
+    ? `<details class="model-diagnostic-details" data-detail-key="${escapeHtml(detailKey(span, 'turn-caps'))}">
+        <summary class="model-panel-head"><strong>loaded this turn</strong> <span class="summary-chip">${tools.length} tools · ${skillCount} skills</span></summary>
+        <pre class="structured-pre">${escapeHtml(
+          `plugin backend: ${pluginBackend || 'none'}\n` +
+            `plugin tools:   ${pluginTools.length ? pluginTools.join(', ') : '(none)'}\n` +
+            `tools (${tools.length}): ${tools.join(', ') || '(none)'}\n` +
+            `skills (${skillCount}): ${skills.join(', ') || '(none)'}`
+        )}</pre>
+      </details>`
+    : '';
   return `
     <article class="content-card wide-card">
-      <header>
-        <h4>Turn Overview</h4>
-      </header>
-      <div class="overview-stack">
-        <section class="overview-row">
-          <div class="overview-title"><strong>summary</strong></div>
-          <div class="evidence-sub">${escapeHtml(`${agent} · ${trigger} triggered turn`)}</div>
-        </section>
-        <section class="overview-row">
-          <div class="overview-title"><strong>session</strong></div>
-          <div class="evidence-sub">${escapeHtml(span.sessionId || '-')}</div>
-          <div class="evidence-sub">${escapeHtml(span.sessionKey || '-')}</div>
-          ${sessionChainLabel(session) ? `<div class="evidence-sub">${escapeHtml(sessionChainLabel(session))}</div>` : ''}
-        </section>
-        <section class="overview-row">
-          <div class="overview-title"><strong>run</strong></div>
-          <div class="evidence-sub">${escapeHtml(span.runId || '-')}</div>
-        </section>
-        <section class="overview-row">
-          <div class="overview-title"><strong>time</strong></div>
-          <div class="evidence-sub">${escapeHtml(start)}</div>
-          <div class="evidence-sub">${escapeHtml(end)}</div>
-          <div class="evidence-sub">${escapeHtml(duration)}</div>
-        </section>
-        <section class="overview-row">
-          <div class="overview-title"><strong>calls in this turn</strong></div>
-          <div class="overview-tags">
-            <span class="summary-chip">${summary.modelCalls} model</span>
-            <span class="summary-chip">${summary.toolCalls} tool</span>
-            <span class="summary-chip">${summary.subagents} subagent</span>
-            <span class="summary-chip">${summary.readSkills.length} skill.read</span>
-          </div>
-        </section>${capsSection}
-      </div>
-    </article>
-  `;
+      <header><h4>Turn Overview</h4><div class="chip-row">${callChips}</div></header>
+      <pre class="structured-pre">${escapeHtml(overview)}</pre>
+      ${capsBlock}
+    </article>`;
+}
+
+// ── Descriptor-driven node rendering (see TRACING_STANDARD.md) ──────────────
+// The body of a node's detail is rendered from its descriptor: either a
+// `custom:<id>` whole-body renderer, or declarative `panels`. Unknown types fall
+// back to top-level input/output (or an attribute dump). raven's own rich cards
+// are registered here as custom renderers, so dispatch is data-driven with zero
+// regression, and any provider's node type renders without viewer code changes.
+
+const CUSTOM_RENDERERS = {
+  sessionTurn: (span, trace) => renderSessionTurnCard(trace, span),
+  llmCall: (span, trace, artifacts) => renderModelInputCard(span, artifacts) + renderModelOutputCard(span, artifacts),
+  subagentCall: (span, trace, artifacts) => renderSubagentCallCard(span, artifacts) + renderSubagentRunCard(span),
+  skillRead: (span, trace, artifacts) => renderSkillReadCard(trace, span, artifacts) + renderSkillEvidenceCard(trace, span),
+  memoryRecall: (span, trace, artifacts) => renderMemoryRecallCard(span, artifacts),
+  memoryStore: (span, trace, artifacts) => renderMemoryStoreCard(span, artifacts),
+  memoryFeedback: (span) => renderMemoryFeedbackCard(span)
+};
+
+function descriptorFor(name) {
+  return (state.descriptors && state.descriptors[name]) || null;
+}
+
+function resolveCustom(id, span, trace, artifacts) {
+  const fn = CUSTOM_RENDERERS[id];
+  return fn ? fn(span, trace, artifacts) : '';
+}
+
+function applyTemplate(tmpl, obj) {
+  return String(tmpl).replace(/\{([^}]+)\}/g, (_, k) => {
+    const v = obj?.[k.trim()];
+    return v == null ? '' : String(v);
+  });
+}
+
+// resolve top-level input/output payload: artifact if referenced, else preview.
+function topLevelPayload(io, artifacts) {
+  if (!io) return undefined;
+  if (io.artifact_path) {
+    const found = (artifacts || []).find((a) => a.artifact?.path === io.artifact_path);
+    if (found) return found.artifact?.parsed ?? found.artifact?.content;
+  }
+  return io.preview;
+}
+
+// resolve a panel `source` to a value: input | output | attr:x | artifact:prefix.
+function resolveSource(span, source, pick, artifacts) {
+  if (!source) return undefined;
+  let value;
+  if (source === 'input') value = topLevelPayload(span.input, artifacts);
+  else if (source === 'output') value = topLevelPayload(span.output, artifacts);
+  else if (source.startsWith('attr:')) value = span.attributes?.[source.slice(5)];
+  else if (source.startsWith('artifact:')) {
+    const p = span.attributes?.[`${source.slice('artifact:'.length)}.artifact_path`];
+    const found = (artifacts || []).find((a) => a.artifact?.path === p);
+    value = found?.artifact?.parsed ?? found?.artifact?.content;
+  }
+  if (pick && value && typeof value === 'object') value = value[pick];
+  return value;
+}
+
+function renderByKind(value, kind, panel) {
+  if (kind === 'list' && Array.isArray(value)) {
+    const text = value
+      .map((it, i) => {
+        if (panel?.item) return `${i + 1}. ${applyTemplate(panel.item, it)}`;
+        if (it && typeof it === 'object') return `${i + 1}. ${it.text ?? JSON.stringify(it)}`;
+        return `${i + 1}. ${it}`;
+      })
+      .join('\n\n');
+    return preBody(text);
+  }
+  if (kind === 'messages' && Array.isArray(value)) {
+    return preBody(value.map((m) => `[${(m && m.role) || '?'}]\n${(m && m.content) || ''}`).join('\n\n'));
+  }
+  if (kind === 'kv' && value && typeof value === 'object') {
+    const lines = Object.entries(value).map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+    return preBody(lines.join('\n'));
+  }
+  if (kind === 'text') return preBody(typeof value === 'string' ? value : prettyValue(value));
+  return `<pre class="structured-pre">${escapeHtml(prettyValue(value))}</pre>`;
+}
+
+function renderPanel(span, panel, artifacts, trace) {
+  if (panel.render && panel.render.startsWith('custom:')) {
+    return resolveCustom(panel.render.slice('custom:'.length), span, trace, artifacts);
+  }
+  const value = resolveSource(span, panel.source, panel.pick, artifacts);
+  return memoryIoCard(panel.title || '', '', renderByKind(value, panel.render || 'json', panel));
+}
+
+function renderFallbackBody(span, artifacts) {
+  const cards = [];
+  if (span.input) {
+    cards.push(memoryIoCard('Input', span.input.kind || '', renderByKind(topLevelPayload(span.input, artifacts), span.input.kind || 'json')));
+  }
+  if (span.output) {
+    cards.push(memoryIoCard('Output', span.output.kind || '', renderByKind(topLevelPayload(span.output, artifacts), span.output.kind || 'json')));
+  }
+  if (cards.length) return cards.join('');
+  const arts = artifacts || [];
+  if (arts.length) {
+    return arts
+      .map(
+        ({ label, artifact }) => `
+          <article class="content-card">
+            <header><h4>${escapeHtml(label)}</h4>
+              <span class="card-note">${escapeHtml(shortId(artifact?.path || '-', 46))}</span></header>
+            <pre>${escapeHtml(prettyArtifactContent(artifact))}</pre>
+          </article>`
+      )
+      .join('');
+  }
+  return `
+    <article class="content-card"><header><h4>attributes</h4></header>
+      <pre class="structured-pre">${escapeHtml(JSON.stringify(span.attributes || {}, null, 2))}</pre></article>`;
+}
+
+function renderNodeBody(span, trace, artifacts) {
+  const desc = descriptorFor(span.name);
+  if (desc) {
+    if (desc.render && desc.render.startsWith('custom:')) {
+      return resolveCustom(desc.render.slice('custom:'.length), span, trace, artifacts);
+    }
+    if (Array.isArray(desc.panels)) {
+      return desc.panels.map((panel) => renderPanel(span, panel, artifacts, trace)).join('');
+    }
+  }
+  return renderFallbackBody(span, artifacts);
 }
 
 function renderContent(span, trace, artifacts) {
+  const heroSubtitle = span.displaySubtitle || '';
+  const heroModelInfo = span.name === 'llm.call'
+    ? [span.attributes?.['llm.provider'], span.attributes?.['llm.model']].filter(Boolean).join(' / ')
+    : '';
+  const usageChips = span.name === 'llm.call' ? llmUsageSummary(span) : [];
+  const heroStatusText = span.isFailed ? (span.failureLabel || span.status?.code || 'FAILED') : (span.status?.code || 'OK');
+  const heroStatusClass = span.isFailed ? 'summary-chip summary-chip-error' : 'summary-chip';
+  return `
+    <div class="content-stack">
+      <article class="content-card hero-card">
+        <header>
+          <h4>${escapeHtml(span.displayTitle)}</h4>
+          ${heroSubtitle ? `<span class="card-note">${escapeHtml(heroSubtitle)}</span>` : ''}
+        </header>
+        <div class="hero-metrics">
+          <span class="summary-chip">${formatDuration(span.durationMs)}</span>
+          <span class="${heroStatusClass}">${escapeHtml(heroStatusText)}</span>
+          ${heroModelInfo ? `<span class="summary-chip">${escapeHtml(heroModelInfo)}</span>` : ''}
+          ${usageChips.map((chip) => `<span class="summary-chip${chip === 'usage 未统计' ? ' summary-chip-soft' : ''}">${escapeHtml(chip)}</span>`).join('')}
+        </div>
+      </article>
+      ${renderNodeBody(span, trace, artifacts)}
+    </div>
+  `;
+}
+
+function renderContentLegacy(span, trace, artifacts) {
   const hiddenArtifactLabels = new Set();
   if (span.name === 'llm.call') {
     hiddenArtifactLabels.add('Model Input');
@@ -2159,6 +2248,51 @@ function preBody(text) {
   return `<pre class="structured-pre">${escapeHtml(t.length ? t : '(empty)')}</pre>`;
 }
 
+// Shared role-colored message list — the `messages` body renderer. Used by any
+// node whose input/output is a chat message array (llm.call, memory.store).
+// content: string OR content-block list; assistant tool_calls appended; the
+// system message (reliably huge boilerplate) collapses by default.
+function messageBodyText(m) {
+  let body = '';
+  const c = m && m.content;
+  if (typeof c === 'string') body = c;
+  else if (Array.isArray(c))
+    body = c
+      .map((b) => (b && typeof b === 'object' ? (b.type === 'text' ? b.text || '' : `[${b.type || 'block'}]`) : String(b)))
+      .join('\n');
+  else if (c != null) body = JSON.stringify(c);
+  if (Array.isArray(m && m.tool_calls) && m.tool_calls.length) {
+    body +=
+      (body ? '\n' : '') +
+      m.tool_calls
+        .map((tc) => {
+          const fn = (tc && tc.function) || {};
+          const args = typeof fn.arguments === 'string' ? fn.arguments : JSON.stringify(fn.arguments || {});
+          return `→ ${fn.name || '?'}(${args})`;
+        })
+        .join('\n');
+  }
+  return body;
+}
+
+function renderMessages(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  if (!list.length) return preBody('(no messages)');
+  return `<div class="msg-list">${list
+    .map((m) => {
+      const role = (m && m.role) || '?';
+      const name = m && m.name ? ` · ${escapeHtml(m.name)}` : '';
+      const body = messageBodyText(m);
+      const bodyHtml = escapeHtml(body || '(empty)');
+      const collapse = role === 'system' || body.length > 800;
+      const inner = collapse
+        ? `<details class="msg-collapse"><summary><span class="msg-role">${escapeHtml(role)}${name}</span><span class="msg-len">${body.length} chars</span></summary><div class="msg-body">${bodyHtml}</div></details>`
+        : `<div class="msg-role">${escapeHtml(role)}${name}</div><div class="msg-body">${bodyHtml}</div>`;
+      return `<div class="msg msg-${escapeHtml(role)}">${inner}</div>`;
+    })
+    .join('')}</div>`;
+}
+
 function renderMemoryRecallCard(span, artifacts) {
   const attrs = span.attributes || {};
   const query = attrs['memory.query'] || '';
@@ -2193,9 +2327,7 @@ function renderMemoryStoreCard(span, artifacts) {
   const attrs = span.attributes || {};
   const stored = artifactByLabel(artifacts, 'Memory Store')?.parsed;
   const messages = stored && Array.isArray(stored.messages) ? stored.messages : [];
-  const inText = messages.length
-    ? messages.map((m) => `[${(m && m.role) || '?'}]\n${(m && m.content) || ''}`).join('\n\n')
-    : 'No stored-messages artifact captured.';
+  const inBody = messages.length ? renderMessages(messages) : preBody('No stored-messages artifact captured.');
   const inNote = [
     attrs['memory.message_count'] != null ? `${attrs['memory.message_count']} msgs` : null,
     attrs['memory.session_id'] || null
@@ -2245,7 +2377,7 @@ function renderMemoryStoreCard(span, artifacts) {
   } else {
     outText = 'Deposit not resolved (everos data unavailable to the viewer).';
   }
-  return memoryIoCard('Store · Input', inNote, preBody(inText)) + memoryIoCard('Store · Output', outNote, preBody(outText));
+  return memoryIoCard('Store · Input', inNote, inBody) + memoryIoCard('Store · Output', outNote, preBody(outText));
 }
 
 function renderMemoryFeedbackCard(span) {
@@ -2418,6 +2550,20 @@ function render() {
   });
 }
 
+async function fetchDescriptors() {
+  try {
+    const res = await fetch('/api/descriptors');
+    const payload = await res.json();
+    const map = {};
+    for (const desc of payload.descriptors || []) {
+      if (desc && desc.type) map[desc.type] = desc;
+    }
+    state.descriptors = map;
+  } catch {
+    state.descriptors = {};
+  }
+}
+
 async function loadData(options = {}) {
   const { silent = false } = options;
   if (state.isLoading) return;
@@ -2529,5 +2675,7 @@ elements.tabs.forEach((tab) => {
   });
 });
 
-loadData();
-startAutoRefresh();
+fetchDescriptors().then(() => {
+  loadData();
+  startAutoRefresh();
+});

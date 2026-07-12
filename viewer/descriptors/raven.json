@@ -1,0 +1,19 @@
+[
+  { "type": "session.turn", "label": "trace", "render": "custom:sessionTurn" },
+  { "type": "llm.call", "label": "model call", "subtitle": "{llm.provider} / {llm.model}", "usage": true, "render": "custom:llmCall" },
+  {
+    "type": "tool.call",
+    "label": "tool call",
+    "subtitle": "{tool.name}",
+    "status": [{ "when": "attr:tool.error", "label": "tool error" }],
+    "panels": [
+      { "title": "Tool Input", "source": "artifact:tool.input", "pick": "params", "render": "json" },
+      { "title": "Tool Output", "source": "artifact:tool.output", "pick": "result", "render": "json" }
+    ]
+  },
+  { "type": "subagent.call", "label": "subagent", "render": "custom:subagentCall" },
+  { "type": "skill.read", "label": "skill read", "render": "custom:skillRead" },
+  { "type": "memory.recall", "label": "memory recall", "render": "custom:memoryRecall" },
+  { "type": "memory.store", "label": "memory store", "render": "custom:memoryStore" },
+  { "type": "memory.feedback", "label": "memory feedback", "render": "custom:memoryFeedback" }
+]

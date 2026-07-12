@@ -2101,35 +2101,62 @@ body.app-view-api .api-only {
 }
 
 /* Subagent cross-trace navigation (dispatch → subagent run, and back) */
-.trace-jump-card {
-  padding: 0;
+.jump-link {
+  margin: 10px;
+  width: calc(100% - 20px);
+  padding: 9px 12px;
   background: transparent;
-  border: none;
-  box-shadow: none;
-}
-.trace-jump-btn {
-  width: 100%;
-  padding: 11px 16px;
-  background: linear-gradient(180deg, var(--accent), var(--accent-strong));
-  color: #06121d;
-  border: none;
+  color: var(--accent);
+  border: 1px solid var(--line);
   border-radius: 10px;
-  font-family: var(--sans);
-  font-size: 13px;
-  font-weight: 700;
+  font-family: var(--mono);
+  font-size: 11px;
   text-align: left;
   cursor: pointer;
-  transition: filter 0.12s ease, transform 0.12s ease;
+  transition: background 0.12s ease, border-color 0.12s ease;
 }
-.trace-jump-btn:hover {
-  filter: brightness(1.07);
-  transform: translateY(-1px);
-}
-.trace-jump-btn:active {
-  transform: translateY(0);
+.jump-link:hover {
+  background: var(--panel-alt);
+  border-color: var(--accent);
 }
 
 /* memory node input/output cards render as .structured-pre (shared with llm/tool cards) */
+
+/* shared role-colored message list (llm.call / memory.store input+output) */
+.chip-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.msg-list { display: flex; flex-direction: column; gap: 10px; padding: 10px; }
+.msg { border-left: 2px solid var(--line-strong); padding-left: 10px; }
+.msg-user { border-left-color: var(--accent-strong); }
+.msg-assistant { border-left-color: var(--accent); }
+.msg-tool { border-left-color: var(--warning); }
+.msg-system { border-left-color: var(--text-muted); }
+.msg-role {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.msg-body {
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+.msg-collapse > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.msg-collapse > summary::-webkit-details-marker { display: none; }
+.msg-collapse[open] > summary { margin-bottom: 6px; }
+.msg-len { font-family: var(--mono); font-size: 10px; color: var(--text-muted); opacity: 0.8; }
 
 /* content search (fuzzy locate across node inputs/outputs) */
 .content-search-results {

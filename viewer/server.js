@@ -18,6 +18,15 @@ const STATE_DIR =
 const LOGS_DIR = getLogsDir();
 const ARTIFACTS_DIR = path.join(LOGS_DIR, 'audit-artifacts');
 const STATIC_DIR = path.join(__dirname, 'ui');
+const BUNDLED_DESCRIPTORS_DIR = path.join(__dirname, 'descriptors');
+const STATE_DESCRIPTORS_DIR = path.join(STATE_DIR, 'descriptors');
+const CLI_DESCRIPTORS = (() => {
+  const argv = process.argv;
+  const i = argv.indexOf('--descriptors');
+  if (i !== -1 && argv[i + 1]) return argv[i + 1];
+  const eq = argv.find((a) => a.startsWith('--descriptors='));
+  return eq ? eq.slice('--descriptors='.length) : null;
+})();
 
 function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, {
@@ -909,11 +918,53 @@ function searchSpans(query) {
   return results.slice(0, MAX_SEARCH_RESULTS);
 }
 
+// Load node-type descriptors, merged by `type` in increasing precedence:
+// bundled → state-dir drop-in → --descriptors CLI. Later sources override.
+// See TRACING_STANDARD.md §7. Never throws — a bad file is skipped.
+function readDescriptorDir(dir) {
+  const out = [];
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return out;
+  }
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+      if (Array.isArray(parsed)) out.push(...parsed);
+      else if (parsed && typeof parsed === 'object') out.push(parsed);
+    } catch {
+      // skip malformed descriptor file
+    }
+  }
+  return out;
+}
+
+function loadDescriptors() {
+  const sources = [
+    ...readDescriptorDir(BUNDLED_DESCRIPTORS_DIR),
+    ...readDescriptorDir(STATE_DESCRIPTORS_DIR),
+    ...(CLI_DESCRIPTORS ? readDescriptorDir(CLI_DESCRIPTORS) : [])
+  ];
+  const byType = new Map();
+  for (const desc of sources) {
+    if (desc && typeof desc.type === 'string') byType.set(desc.type, desc);
+  }
+  return [...byType.values()];
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
 
   if (url.pathname === '/api/health') {
     sendJson(res, 200, { ok: true, port: PORT, stateDir: STATE_DIR });
+    return;
+  }
+
+  if (url.pathname === '/api/descriptors') {
+    sendJson(res, 200, { descriptors: loadDescriptors() });
     return;
   }
 
