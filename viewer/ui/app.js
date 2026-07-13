@@ -1074,17 +1074,58 @@ function renderModelOutputCard(span, artifacts) {
   const llmOutput = artifactByLabel(artifacts, 'Model Output')?.parsed;
   if (!llmOutput) return '';
 
+  // OpenClaw dialect: assistantTexts / lastAssistant. raven dialect: output/content
+  // + a top-level tool_calls array. A tool-calling turn often has empty text and
+  // carries everything in tool_calls, so we must render tool_calls too or the card
+  // collapses to "(no assistant output)" and drops the arguments entirely.
   const assistantTexts = Array.isArray(llmOutput.assistantTexts) ? llmOutput.assistantTexts : [];
-  const finalMessage = assistantContentText(llmOutput.lastAssistant) || llmOutput.output || assistantTexts[assistantTexts.length - 1] || '';
+  const finalMessage =
+    assistantContentText(llmOutput.lastAssistant) ||
+    llmOutput.output ||
+    llmOutput.content ||
+    assistantTexts[assistantTexts.length - 1] ||
+    '';
+
+  // Normalize raven's flat {id,name,arguments} into the {function:{name,arguments}}
+  // shape messageBodyText renders (also tolerate the already-nested OpenAI shape).
+  const toolCalls = (Array.isArray(llmOutput.tool_calls) ? llmOutput.tool_calls : []).map((tc) => ({
+    function: {
+      name: (tc && (tc.name ?? tc.function?.name)) || '?',
+      arguments: (tc && (tc.arguments ?? tc.function?.arguments)) ?? {}
+    }
+  }));
+
   const steps = assistantTexts.length ? assistantTexts : finalMessage ? [finalMessage] : [];
-  const body = steps.length
-    ? renderMessages(steps.map((t) => ({ role: 'assistant', content: t })))
-    : preBody('(no assistant output)');
-  const note = steps.length > 1 ? `${steps.length} steps` : '';
+  let body;
+  if (steps.length || toolCalls.length) {
+    const msgs = steps.map((t) => ({ role: 'assistant', content: t }));
+    if (toolCalls.length) {
+      if (msgs.length) msgs[msgs.length - 1].tool_calls = toolCalls;
+      else msgs.push({ role: 'assistant', content: '', tool_calls: toolCalls });
+    }
+    body = renderMessages(msgs);
+  } else {
+    body = preBody('(no assistant output)');
+  }
+
+  const reasoning = typeof llmOutput.reasoning_content === 'string' ? llmOutput.reasoning_content : '';
+  const reasoningBlock = reasoning
+    ? `<details class="model-diagnostic-details"><summary class="model-panel-head"><strong>Reasoning</strong></summary><pre class="structured-pre">${escapeHtml(reasoning)}</pre></details>`
+    : '';
+
+  const finish = llmOutput.finish_reason || span.attributes?.['llm.finish_reason'] || '';
+  const note = [
+    steps.length > 1 ? `${steps.length} steps` : '',
+    toolCalls.length ? `${toolCalls.length} tool call${toolCalls.length > 1 ? 's' : ''}` : '',
+    finish
+  ]
+    .filter(Boolean)
+    .join(' · ');
   return `
     <article class="content-card wide-card">
       <header><h4>Model Output</h4>${note ? `<span class="card-note">${escapeHtml(note)}</span>` : ''}</header>
       ${body}
+      ${reasoningBlock}
     </article>`;
 }
 
