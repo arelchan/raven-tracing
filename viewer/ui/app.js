@@ -1405,7 +1405,7 @@ function renderTraceList() {
 
   elements.traceTitle.textContent = `${session.agentId || 'agent'} / ${shortId(session.sessionId, 18)}`;
   elements.traceMeta.innerHTML = `
-    <div>${escapeHtml(session.workspaceDir || '-')}</div>
+    ${session.workspaceDir ? `<div>${escapeHtml(session.workspaceDir)}</div>` : ''}
     <div>${session.traceCount} traces</div>
     ${sessionChainLabel(session) ? `<div>${escapeHtml(sessionChainLabel(session))}</div>` : ''}
   `;
@@ -1723,7 +1723,7 @@ function renderSpanNode(node, host) {
   const primaryMeta = node.displaySubtitle || node.kind;
   button.innerHTML = `
     <div class="span-node-main">
-      <div class="span-node-time">${formatTime(node.startTime)}</div>
+      <div class="span-node-time">${formatTimeOnly(node.startTime)}</div>
       <div class="span-node-body">
         <div class="span-node-header">
           <div class="span-node-title">
